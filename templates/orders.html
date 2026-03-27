@@ -55,6 +55,7 @@
           <input type="checkbox" id="select-all-orders" class="order-cb-master" title="Выбрать все на странице" aria-label="Выбрать все на странице" />
         </th>
         <th>№ заказа</th>
+        <th>Поставка</th>
         <th>Статус</th>
         <th>Принят</th>
         <th>Дата отгрузки</th>
@@ -69,6 +70,7 @@
         <th>Размер пр.</th>
         <th>Стоимость</th>
         <th>Склад</th>
+        <th class="col-label-pdf" title="Этикетка PDF">Этик.</th>
       </tr>
     </thead>
     <tbody id="orders-tbody">
@@ -78,7 +80,7 @@
         {% endwith %}
       {% else %}
         <tr>
-          <td colspan="16">Заказы не найдены</td>
+          <td colspan="18">Заказы не найдены</td>
         </tr>
       {% endif %}
     </tbody>
@@ -93,16 +95,31 @@
   <div id="orders-bulk-bar" class="bulk-bar bulk-bar--hidden" aria-hidden="true">
     <div class="bulk-bar-inner">
       <div class="bulk-bar-left">
-        <span class="bulk-count">Выбрано: <span id="bulk-selected-count">0</span></span>
+        <span class="bulk-count" id="bulk-selected-label"></span>
         <button type="button" class="link-btn" id="bulk-select-page">Выбрать все на странице</button>
         <button type="button" class="link-btn" id="bulk-clear">Сбросить</button>
       </div>
       <div class="bulk-bar-right">
-        <form method="post" action="{{ url_for('assemble_orders') }}" id="assemble-form" class="assemble-form">
+        <form method="post" action="{{ url_for('orders_shipment_create') }}" id="shipment-create-form" class="shipment-create-form">
           <input type="hidden" name="next" value="{{ request.full_path }}" />
-          <div id="assemble-inputs"></div>
-          <button type="submit" class="btn btn-bulk-primary" id="assemble-submit">Собрать (0)</button>
+          <input type="hidden" name="shipment_name" id="shipment-name-field" value="" />
+          <div id="shipment-order-inputs"></div>
+          <button type="button" class="btn btn-bulk-primary" id="shipment-open-btn">+ Новая поставка</button>
         </form>
+      </div>
+    </div>
+  </div>
+
+  <div id="shipment-modal" class="modal-overlay modal-overlay--hidden" role="dialog" aria-modal="true" aria-labelledby="shipment-modal-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog--shipment">
+      <button type="button" class="modal-close" id="shipment-modal-x" aria-label="Закрыть">×</button>
+      <h2 id="shipment-modal-title" class="modal-title-shipment">Новая поставка</h2>
+      <p class="modal-subtitle-shipment">В неё попадут выбранные заказы</p>
+      <label class="shipment-name-label" for="shipment-name-input">Название поставки</label>
+      <input type="text" id="shipment-name-input" class="shipment-name-input" autocomplete="off" />
+      <div class="modal-actions modal-actions-shipment">
+        <button type="button" class="btn btn-shipment-create" id="shipment-modal-create">Создать</button>
+        <button type="button" class="btn btn-shipment-close" id="shipment-modal-close">Закрыть</button>
       </div>
     </div>
   </div>

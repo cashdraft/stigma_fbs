@@ -6,5 +6,7 @@ __pycache__/
 *.sqlite3
 instance/*.db
 instance/*.json
+instance/labels/
+logs/
 logs/*.log
 .DS_Store

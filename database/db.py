@@ -2,7 +2,12 @@ import os
 import sqlite3
 
 from config import Config
-from database.models import CREATE_INDEXES, CREATE_ORDER_ITEMS_TABLE, CREATE_ORDERS_TABLE
+from database.models import (
+    CREATE_INDEXES,
+    CREATE_ORDER_ITEMS_TABLE,
+    CREATE_ORDERS_TABLE,
+    CREATE_SHIPMENTS_TABLE,
+)
 
 
 def get_db_connection():
@@ -18,6 +23,16 @@ def init_db():
     try:
         conn.execute(CREATE_ORDERS_TABLE)
         conn.execute(CREATE_ORDER_ITEMS_TABLE)
+        conn.execute(CREATE_SHIPMENTS_TABLE)
+        order_columns = {col["name"] for col in conn.execute("PRAGMA table_info(orders)").fetchall()}
+        if "shipment_id" not in order_columns:
+            conn.execute(
+                "ALTER TABLE orders ADD COLUMN shipment_id INTEGER "
+                "REFERENCES shipments(id) ON DELETE SET NULL"
+            )
+        order_columns = {col["name"] for col in conn.execute("PRAGMA table_info(orders)").fetchall()}
+        if "label_pdf_path" not in order_columns:
+            conn.execute("ALTER TABLE orders ADD COLUMN label_pdf_path TEXT")
         columns = conn.execute("PRAGMA table_info(order_items)").fetchall()
         column_names = {col["name"] for col in columns}
         if "photo_url" not in column_names:

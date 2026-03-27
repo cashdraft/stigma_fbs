@@ -4,6 +4,7 @@
       <input type="checkbox" class="order-cb" name="order_pick" value="{{ order.id }}" data-posting="{{ order.posting_number or '' }}" aria-label="Выбрать заказ {{ order.posting_number or order.id }}" />
     </td>
     <td>{{ order.posting_number or '-' }}</td>
+    <td class="shipment-cell">{{ order.shipment_name or '—' }}</td>
     <td><span class="status">{{ order.status_label }}</span></td>
     <td>{{ order.created_at[:16].replace('T', ' ') if order.created_at else '-' }}</td>
     <td>{{ order.shipment_date[:16].replace('T', ' ') if order.shipment_date else '-' }}</td>
@@ -105,5 +106,20 @@
     </td>
     <td>{{ "%.0f"|format(order.total_price or 0) }} {{ order.currency_code or '' }}</td>
     <td>{{ order.warehouse_name or '-' }}</td>
+    <td class="col-label-pdf">
+      {% if order.label_pdf_path %}
+        <a href="{{ url_for('order_label_pdf', order_id=order.id) }}" class="label-pdf-link" title="Скачать этикетку PDF" aria-label="Скачать этикетку PDF для заказа {{ order.posting_number or order.id }}">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+            <path d="M4 8V6a2 2 0 0 1 2-2h2" />
+            <path d="M20 8V6a2 2 0 0 0-2-2h-2" />
+            <path d="M4 16v2a2 2 0 0 0 2 2h2" />
+            <path d="M20 16v2a2 2 0 0 1-2 2h-2" />
+            <path d="M7 8h3v12H7zM14 8h3v12h-3z" />
+          </svg>
+        </a>
+      {% else %}
+        <span class="label-pdf-empty" title="Нет штрихкода для этикетки">—</span>
+      {% endif %}
+    </td>
   </tr>
 {% endfor %}

@@ -38,10 +38,20 @@ CREATE TABLE IF NOT EXISTS order_items (
 );
 """
 
+CREATE_SHIPMENTS_TABLE = """
+CREATE TABLE IF NOT EXISTS shipments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    marketplace TEXT NOT NULL DEFAULT 'ozon',
+    created_at TEXT NOT NULL
+);
+"""
+
 CREATE_INDEXES = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_marketplace_posting ON orders (marketplace, posting_number);",
     "CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status);",
     "CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders (created_at);",
+    "CREATE INDEX IF NOT EXISTS idx_orders_shipment_id ON orders (shipment_id);",
     "CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items (order_id);",
     "CREATE INDEX IF NOT EXISTS idx_order_items_sku ON order_items (sku);",
 ]

@@ -1,7 +1,8 @@
 import logging
 import os
+import re
 
-from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, request, send_file, url_for
 
 from api_clients.ozon_client import OzonApiError
 from config import Config
@@ -113,19 +114,46 @@ def create_app():
 
         return redirect(url_for("orders"))
 
-    @app.post("/orders/assemble")
-    def assemble_orders():
-        ids = request.form.getlist("order_ids")
+    @app.get("/orders/<int:order_id>/label.pdf")
+    def order_label_pdf(order_id: int):
+        rel = service.ensure_order_label_pdf_file(order_id)
+        if not rel:
+            flash("Нет этикетки: у позиций заказа нет штрихкода.", "error")
+            return redirect(request.referrer or url_for("orders"))
+        path = os.path.join(Config.BASE_DIR, rel.replace("/", os.sep))
+        posting = service.get_order_posting_number(order_id) or str(order_id)
+        safe = re.sub(r"[^\w\-.]+", "_", posting, flags=re.UNICODE)[:120]
+        dl = f"etiketka_{safe}.pdf"
+        return send_file(path, mimetype="application/pdf", as_attachment=True, download_name=dl)
+
+    @app.get("/orders/shipment/next-name")
+    def orders_shipment_next_name():
+        name = service.suggest_next_shipment_name()
+        return jsonify({"name": name})
+
+    @app.post("/orders/shipment/create")
+    def orders_shipment_create():
+        ids_raw = request.form.getlist("order_ids")
         next_url = request.form.get("next") or url_for("orders")
         if isinstance(next_url, str) and next_url.startswith("/") and not next_url.startswith("//"):
             pass
         else:
             next_url = url_for("orders")
-        if not ids:
-            flash("Не выбрано ни одного заказа", "error")
-            return redirect(next_url)
-        logging.info("Сборка заказов (заглушка): %s шт., id=%s", len(ids), ids[:20])
-        flash(f"Выбрано для сборки: {len(ids)} заказов (действие будет подключено к Ozon API)", "success")
+        shipment_name = (request.form.get("shipment_name") or "").strip()
+        order_ids = []
+        for x in ids_raw:
+            try:
+                order_ids.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        result = service.create_shipment_with_orders(shipment_name, order_ids)
+        if result.get("ok"):
+            flash(
+                f"Поставка «{result['name']}» создана, заказов: {result['count']}.",
+                "success",
+            )
+        else:
+            flash(result.get("error") or "Не удалось создать поставку", "error")
         return redirect(next_url)
 
     @app.get("/health")

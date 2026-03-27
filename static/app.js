@@ -6,16 +6,53 @@ document.addEventListener("DOMContentLoaded", () => {
   const tbody = document.getElementById("orders-tbody");
   const cbs = () => Array.from(root.querySelectorAll(".order-cb"));
   const master = root.querySelector(".order-cb-master");
-  const countEl = document.getElementById("bulk-selected-count");
-  const assembleForm = document.getElementById("assemble-form");
-  const assembleInputs = document.getElementById("assemble-inputs");
-  const assembleBtn = document.getElementById("assemble-submit");
+  const bulkLabel = document.getElementById("bulk-selected-label");
+  const shipmentForm = document.getElementById("shipment-create-form");
+  const shipmentOrderInputs = document.getElementById("shipment-order-inputs");
+  const shipmentNameHidden = document.getElementById("shipment-name-field");
+  const shipmentOpenBtn = document.getElementById("shipment-open-btn");
   const selectPageBtn = document.getElementById("bulk-select-page");
   const clearBtn = document.getElementById("bulk-clear");
   const loadBtn = document.getElementById("btn-load-more");
   const loadWrap = document.getElementById("load-more-wrap");
 
+  const shipmentModal = document.getElementById("shipment-modal");
+  const shipmentNameInput = document.getElementById("shipment-name-input");
+  const shipmentModalCreate = document.getElementById("shipment-modal-create");
+  const shipmentModalClose = document.getElementById("shipment-modal-close");
+  const shipmentModalX = document.getElementById("shipment-modal-x");
+
   let nextPage = parseInt(root.dataset.nextPage || "0", 10) || 0;
+
+  function orderWordRu(n) {
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return "заказ";
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "заказа";
+    return "заказов";
+  }
+
+  function bulkSelectionText(n) {
+    if (n <= 0) return "";
+    if (n === 1) return "Выбран 1 заказ";
+    return `Выбрано ${n} ${orderWordRu(n)}`;
+  }
+
+  function openShipmentModal() {
+    if (!shipmentModal || !shipmentNameInput) return;
+    shipmentModal.classList.remove("modal-overlay--hidden");
+    shipmentModal.setAttribute("aria-hidden", "false");
+    document.body.style.overflow = "hidden";
+    shipmentNameInput.focus();
+    shipmentNameInput.select();
+  }
+
+  function closeShipmentModal() {
+    if (!shipmentModal) return;
+    shipmentModal.classList.add("modal-overlay--hidden");
+    shipmentModal.setAttribute("aria-hidden", "true");
+    document.body.style.overflow = "";
+  }
 
   function selected() {
     return cbs().filter((cb) => cb.checked);
@@ -31,8 +68,8 @@ document.addEventListener("DOMContentLoaded", () => {
     const n = sel.length;
     const total = list.length;
 
-    if (countEl) countEl.textContent = String(n);
-    if (assembleBtn) assembleBtn.textContent = `Собрать (${n})`;
+    if (bulkLabel) bulkLabel.textContent = bulkSelectionText(n);
+
     if (selectPageBtn) {
       const t = pageTotal();
       selectPageBtn.textContent = t ? `Выбрать все (${t})` : "Выбрать все на странице";
@@ -50,14 +87,14 @@ document.addEventListener("DOMContentLoaded", () => {
       master.indeterminate = n > 0 && n < total;
     }
 
-    if (assembleInputs) {
-      assembleInputs.innerHTML = "";
+    if (shipmentOrderInputs) {
+      shipmentOrderInputs.innerHTML = "";
       sel.forEach((cb) => {
         const input = document.createElement("input");
         input.type = "hidden";
         input.name = "order_ids";
         input.value = cb.value;
-        assembleInputs.appendChild(input);
+        shipmentOrderInputs.appendChild(input);
       });
     }
   }
@@ -98,24 +135,68 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  if (assembleForm) {
-    assembleForm.addEventListener("submit", (e) => {
+  async function fetchSuggestedShipmentName() {
+    const res = await fetch("/orders/shipment/next-name");
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    return (data && data.name) || "";
+  }
+
+  if (shipmentOpenBtn) {
+    shipmentOpenBtn.addEventListener("click", async () => {
       const n = selected().length;
-      if (n === 0) {
-        e.preventDefault();
-        return;
+      if (n === 0 || !shipmentForm || !shipmentNameInput) return;
+      sync();
+      shipmentNameInput.value = "";
+      try {
+        shipmentNameInput.value = await fetchSuggestedShipmentName();
+      } catch {
+        shipmentNameInput.value = "";
       }
-      const mod10 = n % 10;
-      const mod100 = n % 100;
-      const word =
-        mod10 === 1 && mod100 !== 11
-          ? "заказ"
-          : mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)
-            ? "заказа"
-            : "заказов";
-      const msg = `Будут собраны ${n} ${word}. Вы уверены?`;
-      if (!window.confirm(msg)) {
+      openShipmentModal();
+    });
+  }
+
+  function submitShipmentForm() {
+    if (!shipmentForm || !shipmentNameInput || !shipmentNameHidden) return;
+    const name = shipmentNameInput.value.trim();
+    if (!name) {
+      shipmentNameInput.focus();
+      return;
+    }
+    shipmentNameHidden.value = name;
+    sync();
+    shipmentForm.submit();
+  }
+
+  if (shipmentModalCreate && shipmentForm) {
+    shipmentModalCreate.addEventListener("click", () => submitShipmentForm());
+  }
+
+  if (shipmentNameInput) {
+    shipmentNameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
         e.preventDefault();
+        submitShipmentForm();
+      }
+    });
+  }
+
+  if (shipmentModalClose) {
+    shipmentModalClose.addEventListener("click", () => closeShipmentModal());
+  }
+
+  if (shipmentModalX) {
+    shipmentModalX.addEventListener("click", () => closeShipmentModal());
+  }
+
+  if (shipmentModal) {
+    shipmentModal.addEventListener("click", (e) => {
+      if (e.target === shipmentModal) closeShipmentModal();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && shipmentModal && !shipmentModal.classList.contains("modal-overlay--hidden")) {
+        closeShipmentModal();
       }
     });
   }

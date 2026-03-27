@@ -1,14 +1,18 @@
 import json
 import logging
-from datetime import datetime
+import os
+import sqlite3
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from api_clients.ozon_client import OzonClient
+from config import Config
 from database.db import get_db_connection
 from utils.ozon_product_meta import (
     first_attribute_value,
     resolve_color_and_mfr_size_attr_ids,
 )
+from utils.label_pdf import build_label_pages_for_order_items, write_order_label_pdf
 from utils.ozon_tariff import parse_shipment_tariff_from_raw
 
 EXCLUDED_STATUSES = {"delivered", "cancelled"}
@@ -17,6 +21,13 @@ STATUS_LABELS = {
     "awaiting_deliver": "Ожидает отгрузки",
     "delivering": "Доставляется",
 }
+
+SHIPMENT_NAME_PREFIX = "OZON_"
+
+
+def _shipment_date_prefix(d: Optional[date] = None) -> str:
+    day = d or datetime.now().date()
+    return f"{SHIPMENT_NAME_PREFIX}{day.strftime('%d.%m.%y')}/"
 
 
 class OrdersService:
@@ -193,6 +204,7 @@ class OrdersService:
                     enrich_line_item(item)
                 existed, order_id = self._upsert_order(conn, order)
                 self._replace_order_items(conn, order_id, order["items"])
+                self._sync_order_label_pdf(conn, order_id)
                 if existed:
                     updated += 1
                 else:
@@ -299,6 +311,108 @@ class OrdersService:
                 ),
             )
 
+    @staticmethod
+    def _unlink_label_file(rel: str) -> None:
+        if not rel:
+            return
+        path = rel if os.path.isabs(rel) else os.path.join(Config.BASE_DIR, rel.replace("/", os.sep))
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+    def _sync_order_label_pdf(self, conn: sqlite3.Connection, order_id: int) -> None:
+        row = conn.execute(
+            "SELECT label_pdf_path FROM orders WHERE id = ?",
+            (order_id,),
+        ).fetchone()
+        old = (row["label_pdf_path"] or "").strip() if row else ""
+        item_rows = conn.execute(
+            "SELECT * FROM order_items WHERE order_id = ? ORDER BY id",
+            (order_id,),
+        ).fetchall()
+        dicts = [dict(r) for r in item_rows]
+        pages = build_label_pages_for_order_items(dicts)
+        if not pages:
+            conn.execute("UPDATE orders SET label_pdf_path = NULL WHERE id = ?", (order_id,))
+            if old:
+                self._unlink_label_file(old)
+            return
+        rel = write_order_label_pdf(order_id, pages)
+        conn.execute(
+            "UPDATE orders SET label_pdf_path = ? WHERE id = ?",
+            (rel, order_id),
+        )
+        if old and old != rel:
+            self._unlink_label_file(old)
+
+    def rebuild_all_label_pdfs(self) -> Dict[str, int]:
+        """Пересоздать PDF этикетки для каждого заказа (по строкам order_items с баркодом)."""
+        conn = get_db_connection()
+        n_orders = 0
+        n_with_pdf = 0
+        try:
+            rows = conn.execute("SELECT id FROM orders ORDER BY id").fetchall()
+            for r in rows:
+                oid = int(r["id"])
+                self._sync_order_label_pdf(conn, oid)
+                n_orders += 1
+                row2 = conn.execute(
+                    "SELECT label_pdf_path FROM orders WHERE id = ?",
+                    (oid,),
+                ).fetchone()
+                if row2 and (row2["label_pdf_path"] or "").strip():
+                    n_with_pdf += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        self.logger.info(
+            "Пересборка этикеток: заказов=%s, с PDF=%s",
+            n_orders,
+            n_with_pdf,
+        )
+        return {"orders": n_orders, "with_label_pdf": n_with_pdf}
+
+    def ensure_order_label_pdf_file(self, order_id: int) -> Optional[str]:
+        conn = get_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT id, label_pdf_path FROM orders WHERE id = ?",
+                (order_id,),
+            ).fetchone()
+            if not row:
+                return None
+            rel = (row["label_pdf_path"] or "").strip()
+            path = os.path.join(Config.BASE_DIR, rel.replace("/", os.sep)) if rel else ""
+            if rel and os.path.isfile(path):
+                return rel
+            self._sync_order_label_pdf(conn, order_id)
+            conn.commit()
+            row2 = conn.execute(
+                "SELECT label_pdf_path FROM orders WHERE id = ?",
+                (order_id,),
+            ).fetchone()
+            return ((row2["label_pdf_path"] or "").strip() or None) if row2 else None
+        finally:
+            conn.close()
+
+    def get_order_posting_number(self, order_id: int) -> Optional[str]:
+        conn = get_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT posting_number FROM orders WHERE id = ?",
+                (order_id,),
+            ).fetchone()
+            if not row or not row["posting_number"]:
+                return None
+            return str(row["posting_number"])
+        finally:
+            conn.close()
+
     def get_orders(
         self,
         status: str = "all",
@@ -353,9 +467,11 @@ class OrdersService:
                 f"""
                 SELECT
                     o.*,
-                    COALESCE(SUM(oi.quantity), 0) as total_qty
+                    COALESCE(SUM(oi.quantity), 0) as total_qty,
+                    s.name AS shipment_name
                 FROM orders o
                 LEFT JOIN order_items oi ON oi.order_id = o.id
+                LEFT JOIN shipments s ON s.id = o.shipment_id
                 WHERE {where_sql}
                 GROUP BY o.id
                 ORDER BY o.created_at DESC
@@ -391,6 +507,84 @@ class OrdersService:
                 "per_page": per_page,
                 "pages": max(1, (total + per_page - 1) // per_page),
             }
+        finally:
+            conn.close()
+
+    def suggest_next_shipment_name(self, on_day: Optional[date] = None) -> str:
+        prefix = _shipment_date_prefix(on_day)
+        conn = get_db_connection()
+        try:
+            max_n = 0
+            like_arg = prefix + "%"
+            for row in conn.execute(
+                "SELECT name FROM shipments WHERE name LIKE ?",
+                (like_arg,),
+            ):
+                name = row["name"] or ""
+                if not name.startswith(prefix):
+                    continue
+                tail = name[len(prefix) :]
+                try:
+                    max_n = max(max_n, int(tail))
+                except ValueError:
+                    continue
+            return f"{prefix}{max_n + 1}"
+        finally:
+            conn.close()
+
+    def create_shipment_with_orders(
+        self,
+        name: str,
+        order_ids: List[int],
+        marketplace: str = "ozon",
+    ) -> Dict[str, Any]:
+        clean = (name or "").strip()
+        if not clean:
+            return {"ok": False, "error": "Укажите название поставки"}
+        ids: List[int] = []
+        seen: set = set()
+        for i in order_ids:
+            if i is None:
+                continue
+            try:
+                v = int(i)
+            except (TypeError, ValueError):
+                continue
+            if v not in seen:
+                seen.add(v)
+                ids.append(v)
+        if not ids:
+            return {"ok": False, "error": "Не выбрано ни одного заказа"}
+        now = datetime.utcnow().isoformat()
+        conn = get_db_connection()
+        try:
+            placeholders = ",".join("?" * len(ids))
+            found = conn.execute(
+                f"SELECT COUNT(*) AS c FROM orders WHERE id IN ({placeholders})",
+                ids,
+            ).fetchone()["c"]
+            if found != len(ids):
+                return {"ok": False, "error": "Часть заказов не найдена в базе"}
+            cur = conn.execute(
+                "INSERT INTO shipments (name, marketplace, created_at) VALUES (?, ?, ?)",
+                (clean, marketplace, now),
+            )
+            shipment_id = cur.lastrowid
+            conn.execute(
+                f"""
+                UPDATE orders SET shipment_id = ?
+                WHERE id IN ({placeholders})
+                """,
+                [shipment_id] + ids,
+            )
+            conn.commit()
+            return {"ok": True, "shipment_id": shipment_id, "name": clean, "count": len(ids)}
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return {"ok": False, "error": "Поставка с таким названием уже существует"}
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
