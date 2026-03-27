@@ -1,0 +1,109 @@
+{% for order in orders %}
+  <tr>
+    <td class="col-check">
+      <input type="checkbox" class="order-cb" name="order_pick" value="{{ order.id }}" data-posting="{{ order.posting_number or '' }}" aria-label="Выбрать заказ {{ order.posting_number or order.id }}" />
+    </td>
+    <td>{{ order.posting_number or '-' }}</td>
+    <td><span class="status">{{ order.status_label }}</span></td>
+    <td>{{ order.created_at[:16].replace('T', ' ') if order.created_at else '-' }}</td>
+    <td>{{ order.shipment_date[:16].replace('T', ' ') if order.shipment_date else '-' }}</td>
+    <td class="tariff-cell">
+      <div class="tariff-label">{{ order.tariff_label }}</div>
+      {% if order.tariff_segment_count and order.tariff_segment_count > 0 %}
+        <div class="tariff-bar" role="presentation">
+          {% for i in range(order.tariff_segment_count) %}
+            <span class="tariff-seg{% if i == order.tariff_segment_active %} tariff-seg-active{% endif %}"></span>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% if order.tariff_hint %}
+        <div class="muted tariff-hint">{{ order.tariff_hint }}</div>
+      {% endif %}
+    </td>
+    <td>
+      {% if order["items"] and order["items"][0].photo_url %}
+        <img class="thumb" src="{{ order['items'][0].photo_url }}" alt="Фото товара" loading="lazy" />
+      {% else %}
+        -
+      {% endif %}
+    </td>
+    <td>
+      {% if order["items"] %}
+        {% for item in order["items"][:2] %}
+          <div>{{ item.product_name or item.offer_id or item.sku }}</div>
+        {% endfor %}
+        {% if order["items"]|length > 2 %}
+          <div class="muted">... еще {{ order["items"]|length - 2 }}</div>
+        {% endif %}
+      {% else %}
+        -
+      {% endif %}
+    </td>
+    <td>
+      {% if order["items"] %}
+        {% for item in order["items"][:2] %}
+          <div>{{ item.quantity }} шт</div>
+        {% endfor %}
+        {% if order["items"]|length > 2 %}
+          <div class="muted">... еще {{ order["items"]|length - 2 }}</div>
+        {% endif %}
+      {% else %}
+        -
+      {% endif %}
+    </td>
+    <td>
+      {% if order["items"] %}
+        {% for item in order["items"][:2] %}
+          <div>{{ item.offer_id or item.sku }}</div>
+        {% endfor %}
+        {% if order["items"]|length > 2 %}
+          <div class="muted">... еще {{ order["items"]|length - 2 }}</div>
+        {% endif %}
+      {% else %}
+        -
+      {% endif %}
+    </td>
+    <td>
+      {% if order["items"] %}
+        {% for item in order["items"][:2] %}
+          <div>{{ item.category_leaf or '-' }}</div>
+        {% endfor %}
+        {% if order["items"]|length > 2 %}
+          <div class="muted">...</div>
+        {% endif %}
+      {% else %}-{% endif %}
+    </td>
+    <td>
+      {% if order["items"] %}
+        {% for item in order["items"][:2] %}
+          <div>{{ item.color or '-' }}</div>
+        {% endfor %}
+        {% if order["items"]|length > 2 %}
+          <div class="muted">...</div>
+        {% endif %}
+      {% else %}-{% endif %}
+    </td>
+    <td>
+      {% if order["items"] %}
+        {% for item in order["items"][:2] %}
+          <div>{{ item.barcode or '-' }}</div>
+        {% endfor %}
+        {% if order["items"]|length > 2 %}
+          <div class="muted">...</div>
+        {% endif %}
+      {% else %}-{% endif %}
+    </td>
+    <td>
+      {% if order["items"] %}
+        {% for item in order["items"][:2] %}
+          <div>{{ item.manufacturer_size or '-' }}</div>
+        {% endfor %}
+        {% if order["items"]|length > 2 %}
+          <div class="muted">...</div>
+        {% endif %}
+      {% else %}-{% endif %}
+    </td>
+    <td>{{ "%.0f"|format(order.total_price or 0) }} {{ order.currency_code or '' }}</td>
+    <td>{{ order.warehouse_name or '-' }}</td>
+  </tr>
+{% endfor %}

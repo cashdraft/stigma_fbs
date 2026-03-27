@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="actions-row">
+    <form method="post" action="{{ url_for('update_orders') }}">
+      <input type="hidden" name="status" value="all" />
+      <input type="hidden" name="limit" value="100" />
+      <button type="submit" class="btn">Обновить заказы</button>
+    </form>
+    <a class="btn btn-secondary" href="{{ url_for('orders') }}">Перейти к заказам</a>
+  </section>
+
+  <section class="cards">
+    <div class="card">
+      <span>Всего заказов</span>
+      <strong>{{ summary.total }}</strong>
+    </div>
+    <div class="card">
+      <span>Ожидают упаковки</span>
+      <strong>{{ summary.by_status.get('awaiting_packaging', 0) }}</strong>
+    </div>
+    <div class="card">
+      <span>Ожидают отгрузки</span>
+      <strong>{{ summary.by_status.get('awaiting_deliver', 0) }}</strong>
+    </div>
+    <div class="card">
+      <span>Доставляются</span>
+      <strong>{{ summary.by_status.get('delivering', 0) }}</strong>
+    </div>
+  </section>
+{% endblock %}
