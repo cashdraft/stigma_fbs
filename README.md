@@ -35,3 +35,15 @@ python3 app.py
 - `templates/`, `static/` — интерфейс
 
 Файлы `.env`, база `instance/*.db`, логи `logs/` и кэш категорий в `instance/` в репозиторий не коммитятся (см. `.gitignore`).
+
+## Push на GitHub (без токена в URL и в логе)
+
+В `.env` должен быть `GITHUB_TOKEN` (classic PAT с правом `repo`). Пуш идёт через `GIT_ASKPASS`, вывод при необходимости чистится от похожих на токены строк.
+
+```bash
+cd /srv/stigma_fbs
+python3 scripts/push_github.py
+# другая ветка: python3 scripts/push_github.py develop
+```
+
+Не используйте `git push https://x-access-token:...` — так токен часто попадает в вывод команды.
