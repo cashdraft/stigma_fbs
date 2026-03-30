@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from api_clients.ozon_client import OzonClient
@@ -34,6 +34,42 @@ class OrdersService:
     def __init__(self) -> None:
         self.client = OzonClient()
         self.logger = logging.getLogger(__name__)
+
+    @staticmethod
+    def _build_products_expanded_by_unit(
+        items: List[Dict[str, Any]],
+        max_units_per_order: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """
+        Оzon "Разделить заказ" по смыслу должен разбить позиции на единичные отправления.
+        Мы не храним exemplarsIds в нашей БД, поэтому делаем разбиение за счет того,
+        что в запрос отправляем товары как список элементов с quantity=1.
+
+        Пример: если в заказе строка qty=3 по одному sku, то в payload будет 3 раза:
+          {product_id: sku, quantity: 1}
+        """
+        products: List[Dict[str, Any]] = []
+        n_units = 0
+        for it in items:
+            sku = str(it.get("sku") or "").strip()
+            if not sku:
+                continue
+            try:
+                sku_int = int(sku)
+            except ValueError:
+                continue
+            qty = int(it.get("quantity") or 0)
+            if qty <= 0:
+                continue
+
+            for _ in range(qty):
+                n_units += 1
+                if n_units > max_units_per_order:
+                    raise ValueError(
+                        f"Слишком много единиц для разделения на Ozon: sku={sku_int}, limit={max_units_per_order}"
+                    )
+                products.append({"product_id": sku_int, "quantity": 1})
+        return products
 
     @staticmethod
     def _normalize_posting(posting: Dict[str, Any]) -> Dict[str, Any]:
@@ -99,32 +135,57 @@ class OrdersService:
         limit: int = 100,
         max_records: int = 5000,
     ) -> Dict[str, int]:
+        # Ozon FBS имеет несколько последовательных статусов.
+        # Чтобы локальные статусы не "застревали" (ожидает отгрузки -> доставляется),
+        # синхронизируем сразу все 3 нужных статуса и затем очищаем базу от posting,
+        # которых больше нет ни в одном из трёх статусов Ozon.
+        main_statuses = ["awaiting_packaging", "awaiting_deliver", "delivering"]
+        statuses_to_fetch: List[str]
+        if status in (None, "all") or status in main_statuses:
+            statuses_to_fetch = main_statuses
+        else:
+            statuses_to_fetch = [status] if status else main_statuses
+
+        now = datetime.now(timezone.utc)
+        since_default = now - timedelta(days=30)
+        to_default = now + timedelta(days=1)
+        effective_since_iso = self.client._to_iso8601(since, since_default)
+        effective_to_iso = self.client._to_iso8601(to, to_default, end_of_day=True)
+
         postings: List[Dict[str, Any]] = []
-        offset = 0
-        batch_size = max(1, min(limit, 1000))
+        hit_cap = False
 
-        while True:
-            page = self.client.get_fbs_postings(
-                status=status,
-                since=since,
-                to=to,
-                limit=batch_size,
-                offset=offset,
-            )
-            if not page:
+        batch_size_base = max(1, min(limit, 1000))
+        for st in statuses_to_fetch:
+            offset = 0
+            while True:
+                remaining = max_records - len(postings)
+                if remaining <= 0:
+                    hit_cap = True
+                    postings = postings[:max_records]
+                    break
+
+                batch_size = min(batch_size_base, remaining)
+                page = self.client.get_fbs_postings(
+                    status=st,
+                    since=since,
+                    to=to,
+                    limit=batch_size,
+                    offset=offset,
+                )
+                if not page:
+                    break
+
+                filtered_page = [p for p in page if p.get("status") not in EXCLUDED_STATUSES]
+                postings.extend(filtered_page)
+
+                if len(page) < batch_size:
+                    break
+
+                offset += batch_size
+
+            if hit_cap:
                 break
-
-            filtered_page = [p for p in page if p.get("status") not in EXCLUDED_STATUSES]
-            postings.extend(filtered_page)
-            if len(postings) >= max_records:
-                postings = postings[:max_records]
-                break
-
-            # If page is not full, there are no more records.
-            if len(page) < batch_size:
-                break
-
-            offset += batch_size
 
         sku_values: List[int] = []
         for posting in postings:
@@ -209,6 +270,38 @@ class OrdersService:
                     updated += 1
                 else:
                     created += 1
+            # Cleanup: delete orders which are not present on Ozon anymore (within the same sync window),
+            # but only for the 3 statuses we actually keep history for.
+            deleted = 0
+            if not hit_cap and set(statuses_to_fetch) == set(main_statuses) and postings:
+                posting_numbers = sorted(
+                    {str(p.get("posting_number") or "") for p in postings if p.get("posting_number")}
+                )
+                if posting_numbers:
+                    conn.execute("DROP TABLE IF EXISTS tmp_ozon_postings")
+                    conn.execute(
+                        "CREATE TEMP TABLE tmp_ozon_postings (posting_number TEXT PRIMARY KEY)"
+                    )
+                    chunk = 500
+                    for i in range(0, len(posting_numbers), chunk):
+                        part = posting_numbers[i : i + chunk]
+                        conn.executemany(
+                            "INSERT INTO tmp_ozon_postings (posting_number) VALUES (?)",
+                            [(x,) for x in part],
+                        )
+
+                    cur_del = conn.execute(
+                        """
+                        DELETE FROM orders
+                        WHERE status IN ('awaiting_packaging', 'awaiting_deliver', 'delivering')
+                          AND created_at >= ?
+                          AND created_at <= ?
+                          AND posting_number NOT IN (SELECT posting_number FROM tmp_ozon_postings)
+                        """,
+                        (effective_since_iso, effective_to_iso),
+                    )
+                    deleted = int(getattr(cur_del, "rowcount", 0) or 0)
+
             conn.commit()
         except Exception:
             conn.rollback()
@@ -217,7 +310,7 @@ class OrdersService:
             conn.close()
 
         self.logger.info("Синхронизация заказов завершена: created=%s updated=%s", created, updated)
-        return {"created": created, "updated": updated, "total": len(postings)}
+        return {"created": created, "updated": updated, "total": len(postings), "deleted": deleted}
 
     def _upsert_order(self, conn, order: Dict[str, Any]) -> Tuple[bool, int]:
         now = datetime.utcnow().isoformat()
@@ -483,7 +576,11 @@ class OrdersService:
             statuses = conn.execute(
                 "SELECT status, COUNT(*) as cnt FROM orders GROUP BY status ORDER BY cnt DESC"
             ).fetchall()
-            status_list = [s["status"] for s in statuses if s["status"]]
+            status_options = [
+                {"value": s["status"], "label": STATUS_LABELS.get(s["status"], s["status"] or "-")}
+                for s in statuses
+                if s["status"]
+            ]
 
             orders = [dict(r) for r in rows]
             for order in orders:
@@ -501,7 +598,7 @@ class OrdersService:
 
             return {
                 "orders": orders,
-                "statuses": status_list,
+                "status_options": status_options,
                 "total": total,
                 "page": page,
                 "per_page": per_page,
@@ -532,11 +629,228 @@ class OrdersService:
         finally:
             conn.close()
 
+    def get_shipments_available_for_awaiting_deliver(self, marketplace: str = "ozon") -> List[Dict[str, Any]]:
+        """
+        Поставки для выпадающего списка "Добавить в существующую".
+        Берём только те поставки, к которым уже привязаны заказы в статусе awaiting_deliver.
+        """
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT s.id, s.name
+                FROM shipments s
+                JOIN orders o ON o.shipment_id = s.id
+                WHERE o.status = ?
+                  AND o.shipment_id IS NOT NULL
+                  AND s.marketplace = ?
+                ORDER BY s.created_at DESC
+                """,
+                ["awaiting_deliver", marketplace],
+            ).fetchall()
+            return [{"id": int(r["id"]), "name": r["name"]} for r in rows]
+        finally:
+            conn.close()
+
+    def get_shipments_with_awaiting_deliver_orders(
+        self,
+        marketplace: str = "ozon",
+    ) -> List[Dict[str, Any]]:
+        """Список созданных поставок, где есть хотя бы один заказ в awaiting_deliver."""
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    s.id,
+                    s.name,
+                    s.created_at,
+                    COUNT(o.id) AS orders_count
+                FROM shipments s
+                JOIN orders o ON o.shipment_id = s.id
+                WHERE o.status = ?
+                  AND o.shipment_id IS NOT NULL
+                  AND s.marketplace = ?
+                GROUP BY s.id, s.name, s.created_at
+                ORDER BY s.created_at DESC
+                """,
+                ["awaiting_deliver", marketplace],
+            ).fetchall()
+            return [
+                {
+                    "id": int(r["id"]),
+                    "name": r["name"],
+                    "created_at": r["created_at"],
+                    "orders_count": int(r["orders_count"]),
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
+    def get_shipment_detail(
+        self,
+        shipment_id: int,
+        marketplace: str = "ozon",
+    ) -> Dict[str, Any]:
+        """Детальная страница поставки: все заказы внутри неё (все статусы)."""
+        conn = get_db_connection()
+        try:
+            ship = conn.execute(
+                """
+                SELECT id, name, marketplace, created_at
+                FROM shipments
+                WHERE id = ? AND marketplace = ?
+                """,
+                [shipment_id, marketplace],
+            ).fetchone()
+            if not ship:
+                return {"shipment": None, "orders": []}
+
+            rows = conn.execute(
+                """
+                SELECT
+                    o.*,
+                    s.name AS shipment_name
+                FROM orders o
+                LEFT JOIN shipments s ON s.id = o.shipment_id
+                WHERE o.shipment_id = ?
+                  AND s.marketplace = ?
+                ORDER BY o.created_at DESC
+                """,
+                [shipment_id, marketplace],
+            ).fetchall()
+
+            orders = [dict(r) for r in rows]
+            for order in orders:
+                items = conn.execute(
+                    "SELECT * FROM order_items WHERE order_id = ? ORDER BY id",
+                    (order["id"],),
+                ).fetchall()
+                order["items"] = [dict(i) for i in items]
+
+                order["status_label"] = STATUS_LABELS.get(
+                    order.get("status"), order.get("status") or "-"
+                )
+                tinfo = parse_shipment_tariff_from_raw(order.get("raw_json"))
+                order["tariff_label"] = tinfo["label"]
+                order["tariff_hint"] = tinfo["hint"]
+                order["tariff_segment_active"] = tinfo["segment_active"]
+                order["tariff_segment_count"] = tinfo["segment_count"]
+
+            return {"shipment": dict(ship), "orders": orders}
+        finally:
+            conn.close()
+
+    def add_orders_to_existing_shipment(
+        self,
+        shipment_id: int,
+        order_ids: List[int],
+        marketplace: str = "ozon",
+    ) -> Dict[str, Any]:
+        """
+        Добавить выбранные заказы (из awaiting_packaging) в существующую поставку:
+        1) вызываем Ozon ship для posting_number
+        2) после успеха обновляем локально orders.shipment_id и статус awaiting_deliver
+        """
+        if not shipment_id:
+            return {"ok": False, "error": "Не выбрана поставка"}
+
+        # De-dupe and normalize ids
+        ids: List[int] = []
+        seen: set = set()
+        for i in order_ids:
+            try:
+                v = int(i)
+            except (TypeError, ValueError):
+                continue
+            if v not in seen:
+                seen.add(v)
+                ids.append(v)
+        if not ids:
+            return {"ok": False, "error": "Не выбрано ни одного заказа"}
+
+        conn = get_db_connection()
+        try:
+            placeholders = ",".join("?" * len(ids))
+            srow = conn.execute(
+                "SELECT id, name FROM shipments WHERE id = ? AND marketplace = ?",
+                [shipment_id, marketplace],
+            ).fetchone()
+            if not srow:
+                return {"ok": False, "error": "Поставка не найдена"}
+
+            eligible_rows = conn.execute(
+                f"""
+                SELECT id, posting_number
+                FROM orders
+                WHERE id IN ({placeholders})
+                  AND status = ?
+                """,
+                [*ids, "awaiting_packaging"],
+            ).fetchall()
+            eligible_ids = [int(r["id"]) for r in eligible_rows]
+
+            # Ensure user action is explicit/consistent.
+            if len(eligible_ids) != len(ids):
+                return {
+                    "ok": False,
+                    "error": "Добавлять можно только заказы в статусе \"Ожидает сборки\"",
+                }
+
+            n_ozon = 0
+            for orow in eligible_rows:
+                oid = int(orow["id"])
+                posting_number = str(orow["posting_number"] or "")
+                if not posting_number:
+                    raise ValueError(f"Нет posting_number для order_id={oid}")
+
+                items = conn.execute(
+                    "SELECT sku, quantity FROM order_items WHERE order_id = ?",
+                    (oid,),
+                ).fetchall()
+
+                items_dicts = [dict(x) for x in items]
+                products = self._build_products_expanded_by_unit(items_dicts)
+
+                self.client.ship_fbs_posting(
+                    posting_number=posting_number,
+                    products=products or None,
+                )
+                n_ozon += 1
+
+            now = datetime.utcnow().isoformat()
+            st_placeholders = ",".join("?" * len(eligible_ids))
+            conn.execute(
+                f"""
+                UPDATE orders
+                SET shipment_id = ?,
+                    status = ?,
+                    updated_at = ?
+                WHERE id IN ({st_placeholders})
+                """,
+                [shipment_id, "awaiting_deliver", now, *eligible_ids],
+            )
+            conn.commit()
+            return {
+                "ok": True,
+                "shipment_id": shipment_id,
+                "shipment_name": srow["name"],
+                "count": len(eligible_ids),
+                "ozon_ship_requests": n_ozon,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def create_shipment_with_orders(
         self,
         name: str,
         order_ids: List[int],
         marketplace: str = "ozon",
+        ship_after: bool = False,
     ) -> Dict[str, Any]:
         clean = (name or "").strip()
         if not clean:
@@ -565,6 +879,22 @@ class OrdersService:
             ).fetchone()["c"]
             if found != len(ids):
                 return {"ok": False, "error": "Часть заказов не найдена в базе"}
+
+            # Business rule:
+            # Мы можем "перенести в Ожидает отгрузки" на стороне Ozon только когда заказ
+            # находится в нашей "поставке" (internal shipment).
+            #
+            # Этот endpoint как раз и создает shipment и присваивает shipment_id заказам,
+            # поэтому переносим статус только для тех заказов, которые в момент нажатия
+            # находятся в "Ожидает сборки" (awaiting_packaging).
+            eligible_for_status = [
+                int(r["id"])
+                for r in conn.execute(
+                    f"SELECT id FROM orders WHERE id IN ({placeholders}) AND status = ?",
+                    [*ids, "awaiting_packaging"],
+                ).fetchall()
+            ]
+
             cur = conn.execute(
                 "INSERT INTO shipments (name, marketplace, created_at) VALUES (?, ?, ?)",
                 (clean, marketplace, now),
@@ -577,8 +907,74 @@ class OrdersService:
                 """,
                 [shipment_id] + ids,
             )
+
+            n_shipped = 0
+            if ship_after and eligible_for_status:
+                # 1) Ship on Ozon for each eligible posting.
+                eligible_ph = ",".join("?" * len(eligible_for_status))
+                posting_rows = conn.execute(
+                    f"""
+                    SELECT id, posting_number
+                    FROM orders
+                    WHERE id IN ({eligible_ph})
+                    AND status = ?
+                    """,
+                    [*eligible_for_status, "awaiting_packaging"],
+                ).fetchall()
+
+                for orow in posting_rows:
+                    oid = int(orow["id"])
+                    posting_number = str(orow["posting_number"] or "")
+                    if not posting_number:
+                        raise ValueError(f"Нет posting_number для order_id={oid}")
+
+                    items = conn.execute(
+                        "SELECT sku, quantity FROM order_items WHERE order_id = ?",
+                        (oid,),
+                    ).fetchall()
+
+                    # Split by 1 unit (как "Разделить заказ" в кабинете):
+                    # делаем список {product_id, quantity=1} с повторами по quantity.
+                    items_dicts = [dict(x) for x in items]
+                    products = self._build_products_expanded_by_unit(items_dicts)
+
+                    self.client.ship_fbs_posting(
+                        posting_number=posting_number,
+                        products=products or None,
+                    )
+                    n_shipped += 1
+
+                # 2) After Ozon ship success, move local statuses.
+                st_placeholders = ",".join("?" * len(eligible_for_status))
+                conn.execute(
+                    f"""
+                    UPDATE orders
+                    SET status = ?
+                    WHERE id IN ({st_placeholders})
+                    """,
+                    ["awaiting_deliver", *eligible_for_status],
+                )
+            elif eligible_for_status:
+                # Without Ozon call (debug / old mode): just move status locally.
+                st_placeholders = ",".join("?" * len(eligible_for_status))
+                conn.execute(
+                    f"""
+                    UPDATE orders
+                    SET status = ?
+                    WHERE id IN ({st_placeholders})
+                    """,
+                    ["awaiting_deliver", *eligible_for_status],
+                )
+
             conn.commit()
-            return {"ok": True, "shipment_id": shipment_id, "name": clean, "count": len(ids)}
+            return {
+                "ok": True,
+                "shipment_id": shipment_id,
+                "name": clean,
+                "count": len(ids),
+                "status_moved_to_awaiting_deliver": len(eligible_for_status),
+                "ozon_ship_requests": n_shipped if ship_after else 0,
+            }
         except sqlite3.IntegrityError:
             conn.rollback()
             return {"ok": False, "error": "Поставка с таким названием уже существует"}

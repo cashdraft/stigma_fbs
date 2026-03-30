@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="actions-row">
+    <h2 style="margin: 0;">Поставки</h2>
+    <a class="btn btn-secondary" href="{{ url_for('orders') }}">Перейти к заказам</a>
+  </section>
+
+  <p class="muted">Показаны только поставки, в которых есть заказы со статусом «Ожидает отгрузки».</p>
+
+  <table class="orders-table">
+    <thead>
+      <tr>
+        <th>Поставка</th>
+        <th>Создана</th>
+        <th>Заказов</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if shipments %}
+        {% for s in shipments %}
+          <tr>
+            <td>
+              <a href="{{ url_for('shipment_detail', shipment_id=s.id) }}" style="color: #175cd3; font-weight: 600; text-decoration: none;">
+                {{ s.name }}
+              </a>
+            </td>
+            <td>{{ s.created_at[:16].replace('T', ' ') if s.created_at else '—' }}</td>
+            <td style="font-weight: 600;">{{ s.orders_count }}</td>
+          </tr>
+        {% endfor %}
+      {% else %}
+        <tr>
+          <td colspan="3">Поставок пока нет</td>
+        </tr>
+      {% endif %}
+    </tbody>
+  </table>
+{% endblock %}
+

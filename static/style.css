@@ -75,7 +75,7 @@ body.has-bulk-bar {
 
 .filters {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -111,12 +111,45 @@ td {
   font-size: 14px;
 }
 
+.col-status {
+  text-align: center;
+  vertical-align: middle;
+}
+
 .status {
-  background: #eff8ff;
-  color: #175cd3;
-  padding: 2px 8px;
+  display: inline-block;
+  padding: 4px 10px;
   border-radius: 10px;
   font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.status--awaiting_packaging {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.status--awaiting_deliver {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.status--delivering {
+  background: #d1fae5;
+  color: #047857;
+}
+
+/* Одна миниатюра на строку; многострочные заказы — несколько <tr> с rowspan (см. order_rows). */
+.col-thumbs {
+  width: 68px;
+  vertical-align: middle;
+}
+
+tr.order-item-row--cont > td {
+  border-top: 1px dashed #eaecf0;
 }
 
 .thumb {
@@ -125,6 +158,20 @@ td {
   object-fit: cover;
   border-radius: 8px;
   border: 1px solid #e4e7ec;
+  display: block;
+}
+
+.thumb-empty {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  border: 1px dashed #e4e7ec;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: #98a2b3;
+  background: #f9fafb;
 }
 
 .tariff-cell {
@@ -287,6 +334,19 @@ td {
   border-color: #2e90fa;
   font-weight: 600;
   padding: 10px 20px;
+}
+
+.btn-bulk-secondary {
+  background: #e6f1ff;
+  border-color: #a7c8ff;
+  color: #175cd3;
+  font-weight: 600;
+  padding: 10px 20px;
+}
+
+.btn-bulk-secondary:hover {
+  background: #d8eaff;
+  border-color: #84b3ff;
 }
 
 .shipment-create-form {

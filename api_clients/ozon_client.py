@@ -195,3 +195,23 @@ class OzonClient:
                 continue
             out[str(int(sku))] = item
         return out
+
+    def ship_fbs_posting(
+        self,
+        posting_number: str,
+        products: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Перевод FBS posting в следующее состояние (отгрузка) через Seller API.
+
+        В качестве endpoint используем /v4/posting/fbs/ship/package.
+        """
+        if not posting_number:
+            raise OzonApiError("Отсутствует posting_number для отгрузки")
+
+        payload: Dict[str, Any] = {"posting_number": posting_number}
+        if products:
+            payload["products"] = products
+
+        # Ozon API response format is not strictly typed here; we pass through result.
+        return self._post("/v4/posting/fbs/ship/package", payload)

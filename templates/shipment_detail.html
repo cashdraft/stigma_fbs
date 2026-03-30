@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="actions-row">
+    <h2 style="margin: 0;">Поставка: {{ shipment.name }}</h2>
+    <a class="btn btn-secondary" href="{{ url_for('shipments') }}">Назад к поставкам</a>
+  </section>
+
+  <p class="muted">В этой поставке показаны заказы целиком (все их статусы).</p>
+
+  <table class="orders-table">
+    <thead>
+      <tr>
+        <th class="col-check">
+          <input type="checkbox" id="select-all-orders" class="order-cb-master" title="Выбрать все на странице" aria-label="Выбрать все на странице" />
+        </th>
+        <th>№ заказа</th>
+        <th>Поставка</th>
+        <th class="col-status">Статус</th>
+        <th>Принят</th>
+        <th>Дата отгрузки</th>
+        <th>Тариф отгрузки</th>
+        <th>Фото</th>
+        <th>Товары</th>
+        <th>Количество</th>
+        <th>Артикул</th>
+        <th>Категория</th>
+        <th>Цвет</th>
+        <th>Штрихкод</th>
+        <th>Размер пр.</th>
+        <th>Стоимость</th>
+        <th>Склад</th>
+        <th class="col-label-pdf" title="Этикетка PDF">Этик.</th>
+      </tr>
+    </thead>
+    <tbody id="orders-tbody">
+      {% if orders %}
+        {% include "partials/order_rows.html" %}
+      {% else %}
+        <tr>
+          <td colspan="18">Заказы в поставке не найдены</td>
+        </tr>
+      {% endif %}
+    </tbody>
+  </table>
+{% endblock %}
+

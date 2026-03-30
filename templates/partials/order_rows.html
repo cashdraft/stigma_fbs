@@ -1,11 +1,73 @@
 {% for order in orders %}
-  <tr>
+  {% set items = order["items"] if order["items"] else [] %}
+  {% if items|length > 0 %}
+    {% set rs = items|length %}
+    {% for item in items %}
+  <tr class="order-item-row{% if not loop.first %} order-item-row--cont{% endif %}" data-order-id="{{ order.id }}">
+    {% if loop.first %}
+    <td class="col-check" rowspan="{{ rs }}">
+      <input type="checkbox" class="order-cb" name="order_pick" value="{{ order.id }}" data-posting="{{ order.posting_number or '' }}" aria-label="Выбрать заказ {{ order.posting_number or order.id }}" />
+    </td>
+    <td rowspan="{{ rs }}">{{ order.posting_number or '-' }}</td>
+    <td class="shipment-cell" rowspan="{{ rs }}">{{ order.shipment_name or '—' }}</td>
+    <td class="col-status" rowspan="{{ rs }}"><span class="status status--{{ order.status or 'unknown' }}">{{ order.status_label }}</span></td>
+    <td rowspan="{{ rs }}">{{ order.created_at[:16].replace('T', ' ') if order.created_at else '-' }}</td>
+    <td rowspan="{{ rs }}">{{ order.shipment_date[:16].replace('T', ' ') if order.shipment_date else '-' }}</td>
+    <td class="tariff-cell" rowspan="{{ rs }}">
+      <div class="tariff-label">{{ order.tariff_label }}</div>
+      {% if order.tariff_segment_count and order.tariff_segment_count > 0 %}
+        <div class="tariff-bar" role="presentation">
+          {% for i in range(order.tariff_segment_count) %}
+            <span class="tariff-seg{% if i == order.tariff_segment_active %} tariff-seg-active{% endif %}"></span>
+          {% endfor %}
+        </div>
+      {% endif %}
+      {% if order.tariff_hint %}
+        <div class="muted tariff-hint">{{ order.tariff_hint }}</div>
+      {% endif %}
+    </td>
+    {% endif %}
+    <td class="col-thumbs">
+      {% if item.photo_url %}
+        <img class="thumb" src="{{ item.photo_url }}" alt="" loading="lazy" />
+      {% else %}
+        <div class="thumb-empty">—</div>
+      {% endif %}
+    </td>
+    <td>{{ item.product_name or item.offer_id or item.sku }}</td>
+    <td>{{ item.quantity }} шт</td>
+    <td>{{ item.offer_id or item.sku }}</td>
+    <td>{{ item.category_leaf or '-' }}</td>
+    <td>{{ item.color or '-' }}</td>
+    <td>{{ item.barcode or '-' }}</td>
+    <td>{{ item.manufacturer_size or '-' }}</td>
+    {% if loop.first %}
+    <td rowspan="{{ rs }}">{{ "%.0f"|format(order.total_price or 0) }} {{ order.currency_code or '' }}</td>
+    <td rowspan="{{ rs }}">{{ order.warehouse_name or '-' }}</td>
+    <td class="col-label-pdf" rowspan="{{ rs }}">
+      {% if order.label_pdf_path %}
+        <a href="{{ url_for('order_label_pdf', order_id=order.id) }}" class="label-pdf-link" title="Скачать этикетку PDF" aria-label="Скачать этикетку PDF для заказа {{ order.posting_number or order.id }}">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" x2="12" y1="15" y2="3" />
+          </svg>
+        </a>
+      {% else %}
+        <span class="label-pdf-empty" title="Нет штрихкода для этикетки">—</span>
+      {% endif %}
+    </td>
+    {% endif %}
+  </tr>
+    {% endfor %}
+  {% else %}
+  <tr class="order-item-row" data-order-id="{{ order.id }}">
     <td class="col-check">
       <input type="checkbox" class="order-cb" name="order_pick" value="{{ order.id }}" data-posting="{{ order.posting_number or '' }}" aria-label="Выбрать заказ {{ order.posting_number or order.id }}" />
     </td>
     <td>{{ order.posting_number or '-' }}</td>
     <td class="shipment-cell">{{ order.shipment_name or '—' }}</td>
-    <td><span class="status">{{ order.status_label }}</span></td>
+    <td class="col-status"><span class="status status--{{ order.status or 'unknown' }}">{{ order.status_label }}</span></td>
     <td>{{ order.created_at[:16].replace('T', ' ') if order.created_at else '-' }}</td>
     <td>{{ order.shipment_date[:16].replace('T', ' ') if order.shipment_date else '-' }}</td>
     <td class="tariff-cell">
@@ -21,100 +83,23 @@
         <div class="muted tariff-hint">{{ order.tariff_hint }}</div>
       {% endif %}
     </td>
-    <td>
-      {% if order["items"] and order["items"][0].photo_url %}
-        <img class="thumb" src="{{ order['items'][0].photo_url }}" alt="Фото товара" loading="lazy" />
-      {% else %}
-        -
-      {% endif %}
-    </td>
-    <td>
-      {% if order["items"] %}
-        {% for item in order["items"][:2] %}
-          <div>{{ item.product_name or item.offer_id or item.sku }}</div>
-        {% endfor %}
-        {% if order["items"]|length > 2 %}
-          <div class="muted">... еще {{ order["items"]|length - 2 }}</div>
-        {% endif %}
-      {% else %}
-        -
-      {% endif %}
-    </td>
-    <td>
-      {% if order["items"] %}
-        {% for item in order["items"][:2] %}
-          <div>{{ item.quantity }} шт</div>
-        {% endfor %}
-        {% if order["items"]|length > 2 %}
-          <div class="muted">... еще {{ order["items"]|length - 2 }}</div>
-        {% endif %}
-      {% else %}
-        -
-      {% endif %}
-    </td>
-    <td>
-      {% if order["items"] %}
-        {% for item in order["items"][:2] %}
-          <div>{{ item.offer_id or item.sku }}</div>
-        {% endfor %}
-        {% if order["items"]|length > 2 %}
-          <div class="muted">... еще {{ order["items"]|length - 2 }}</div>
-        {% endif %}
-      {% else %}
-        -
-      {% endif %}
-    </td>
-    <td>
-      {% if order["items"] %}
-        {% for item in order["items"][:2] %}
-          <div>{{ item.category_leaf or '-' }}</div>
-        {% endfor %}
-        {% if order["items"]|length > 2 %}
-          <div class="muted">...</div>
-        {% endif %}
-      {% else %}-{% endif %}
-    </td>
-    <td>
-      {% if order["items"] %}
-        {% for item in order["items"][:2] %}
-          <div>{{ item.color or '-' }}</div>
-        {% endfor %}
-        {% if order["items"]|length > 2 %}
-          <div class="muted">...</div>
-        {% endif %}
-      {% else %}-{% endif %}
-    </td>
-    <td>
-      {% if order["items"] %}
-        {% for item in order["items"][:2] %}
-          <div>{{ item.barcode or '-' }}</div>
-        {% endfor %}
-        {% if order["items"]|length > 2 %}
-          <div class="muted">...</div>
-        {% endif %}
-      {% else %}-{% endif %}
-    </td>
-    <td>
-      {% if order["items"] %}
-        {% for item in order["items"][:2] %}
-          <div>{{ item.manufacturer_size or '-' }}</div>
-        {% endfor %}
-        {% if order["items"]|length > 2 %}
-          <div class="muted">...</div>
-        {% endif %}
-      {% else %}-{% endif %}
-    </td>
+    <td class="col-thumbs">-</td>
+    <td>-</td>
+    <td>-</td>
+    <td>-</td>
+    <td>-</td>
+    <td>-</td>
+    <td>-</td>
+    <td>-</td>
     <td>{{ "%.0f"|format(order.total_price or 0) }} {{ order.currency_code or '' }}</td>
     <td>{{ order.warehouse_name or '-' }}</td>
     <td class="col-label-pdf">
       {% if order.label_pdf_path %}
         <a href="{{ url_for('order_label_pdf', order_id=order.id) }}" class="label-pdf-link" title="Скачать этикетку PDF" aria-label="Скачать этикетку PDF для заказа {{ order.posting_number or order.id }}">
-          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-            <path d="M4 8V6a2 2 0 0 1 2-2h2" />
-            <path d="M20 8V6a2 2 0 0 0-2-2h-2" />
-            <path d="M4 16v2a2 2 0 0 0 2 2h2" />
-            <path d="M20 16v2a2 2 0 0 1-2 2h-2" />
-            <path d="M7 8h3v12H7zM14 8h3v12h-3z" />
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" x2="12" y1="15" y2="3" />
           </svg>
         </a>
       {% else %}
@@ -122,4 +107,5 @@
       {% endif %}
     </td>
   </tr>
+  {% endif %}
 {% endfor %}

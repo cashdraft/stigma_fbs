@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from typing import List
 
 from flask import Flask, flash, jsonify, redirect, render_template, request, send_file, url_for
 
@@ -131,6 +132,11 @@ def create_app():
         name = service.suggest_next_shipment_name()
         return jsonify({"name": name})
 
+    @app.get("/orders/shipment/available")
+    def orders_shipment_available():
+        shipments = service.get_shipments_available_for_awaiting_deliver()
+        return jsonify({"shipments": shipments})
+
     @app.post("/orders/shipment/create")
     def orders_shipment_create():
         ids_raw = request.form.getlist("order_ids")
@@ -146,15 +152,80 @@ def create_app():
                 order_ids.append(int(x))
             except (TypeError, ValueError):
                 continue
-        result = service.create_shipment_with_orders(shipment_name, order_ids)
-        if result.get("ok"):
-            flash(
-                f"Поставка «{result['name']}» создана, заказов: {result['count']}.",
-                "success",
+        try:
+            result = service.create_shipment_with_orders(
+                shipment_name,
+                order_ids,
+                ship_after=True,
             )
-        else:
-            flash(result.get("error") or "Не удалось создать поставку", "error")
+            if result.get("ok"):
+                flash(
+                    f"Поставка «{result['name']}» создана и отгружена, заказов: {result['count']}.",
+                    "success",
+                )
+            else:
+                flash(result.get("error") or "Не удалось создать поставку", "error")
+        except OzonApiError as exc:
+            logging.exception("Ошибка Ozon API при создании поставки/отгрузки")
+            flash(str(exc), "error")
         return redirect(next_url)
+
+    @app.post("/orders/shipment/add-existing")
+    def orders_shipment_add_existing():
+        ids_raw = request.form.getlist("order_ids")
+        next_url = request.form.get("next") or url_for("orders")
+        if isinstance(next_url, str) and next_url.startswith("/") and not next_url.startswith("//"):
+            pass
+        else:
+            next_url = url_for("orders")
+
+        shipment_id_raw = request.form.get("shipment_id")
+        try:
+            shipment_id = int(shipment_id_raw)
+        except (TypeError, ValueError):
+            flash("Не выбрана поставка", "error")
+            return redirect(next_url)
+
+        order_ids: List[int] = []
+        for x in ids_raw:
+            try:
+                order_ids.append(int(x))
+            except (TypeError, ValueError):
+                continue
+
+        try:
+            result = service.add_orders_to_existing_shipment(
+                shipment_id=shipment_id,
+                order_ids=order_ids,
+            )
+            if result.get("ok"):
+                flash(
+                    f"Добавлено в поставку «{result.get('shipment_name') or shipment_id}», заказов: {result['count']}.",
+                    "success",
+                )
+            else:
+                flash(result.get("error") or "Не удалось добавить в поставку", "error")
+        except OzonApiError as exc:
+            logging.exception("Ошибка Ozon API при добавлении в существующую поставку")
+            flash(str(exc), "error")
+
+        return redirect(next_url)
+
+    @app.get("/shipments")
+    def shipments():
+        items = service.get_shipments_with_awaiting_deliver_orders()
+        return render_template("shipments.html", shipments=items)
+
+    @app.get("/shipments/<int:shipment_id>")
+    def shipment_detail(shipment_id: int):
+        data = service.get_shipment_detail(shipment_id)
+        shipment = data.get("shipment") or {}
+        orders = data.get("orders") or []
+        return render_template(
+            "shipment_detail.html",
+            shipment=shipment,
+            orders=orders,
+        )
 
     @app.get("/health")
     def health():

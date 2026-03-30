@@ -21,29 +21,31 @@
     </form>
   </section>
 
-  <form method="get" action="{{ url_for('orders') }}" class="filters">
+  <form method="get" action="{{ url_for('orders') }}" class="filters" id="orders-filters">
     <label>
       Статус
       <select name="status">
         <option value="all" {% if filters.status == 'all' %}selected{% endif %}>Все</option>
-        {% for st in data.statuses %}
-          <option value="{{ st }}" {% if filters.status == st %}selected{% endif %}>{{ st }}</option>
+        {% for opt in data.status_options %}
+          <option value="{{ opt.value }}" {% if filters.status == opt.value %}selected{% endif %}>{{ opt.label }}</option>
         {% endfor %}
       </select>
     </label>
     <label>
       От даты
-      <input type="date" name="date_from" value="{{ filters.date_from }}" />
+      <input type="date" name="date_from" value="{{ filters.date_from }}" autocomplete="off" />
     </label>
     <label>
       До даты
-      <input type="date" name="date_to" value="{{ filters.date_to }}" />
+      <input type="date" name="date_to" value="{{ filters.date_to }}" autocomplete="off" />
     </label>
     <label>
       Поиск
-      <input type="text" name="q" value="{{ filters.q }}" placeholder="posting/order/SKU" />
+      <input type="search" name="q" value="{{ filters.q }}" placeholder="posting/order/SKU" enterkeyhint="search" autocomplete="off" />
     </label>
-    <button type="submit" class="btn">Применить</button>
+    <noscript>
+      <button type="submit" class="btn">Применить</button>
+    </noscript>
   </form>
 
   <p class="muted">Найдено заказов: {{ data.total }}</p>
@@ -56,7 +58,7 @@
         </th>
         <th>№ заказа</th>
         <th>Поставка</th>
-        <th>Статус</th>
+        <th class="col-status">Статус</th>
         <th>Принят</th>
         <th>Дата отгрузки</th>
         <th>Тариф отгрузки</th>
@@ -106,6 +108,13 @@
           <div id="shipment-order-inputs"></div>
           <button type="button" class="btn btn-bulk-primary" id="shipment-open-btn">+ Новая поставка</button>
         </form>
+
+        <form method="post" action="{{ url_for('orders_shipment_add_existing') }}" id="shipment-add-form" class="shipment-add-form">
+          <input type="hidden" name="next" value="{{ request.full_path }}" />
+          <input type="hidden" name="shipment_id" id="shipment-existing-id-field" value="" />
+          <div id="shipment-order-inputs-add"></div>
+        </form>
+        <button type="button" class="btn btn-bulk-secondary" id="shipment-add-open-btn">Добавить в существующую</button>
       </div>
     </div>
   </div>
@@ -118,10 +127,24 @@
       <label class="shipment-name-label" for="shipment-name-input">Название поставки</label>
       <input type="text" id="shipment-name-input" class="shipment-name-input" autocomplete="off" />
       <div class="modal-actions modal-actions-shipment">
-        <button type="button" class="btn btn-shipment-create" id="shipment-modal-create">Создать</button>
+        <button type="button" class="btn btn-shipment-create" id="shipment-modal-create">Создать и отгрузить</button>
         <button type="button" class="btn btn-shipment-close" id="shipment-modal-close">Закрыть</button>
       </div>
     </div>
   </div>
+  </div>
+
+  <div id="shipment-existing-modal" class="modal-overlay modal-overlay--hidden" role="dialog" aria-modal="true" aria-labelledby="shipment-existing-modal-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog--shipment">
+      <button type="button" class="modal-close" id="shipment-existing-modal-x" aria-label="Закрыть">×</button>
+      <h2 id="shipment-existing-modal-title" class="modal-title-shipment">Добавить в существующую поставку</h2>
+      <p class="modal-subtitle-shipment">В неё попадут выбранные заказы</p>
+      <label class="shipment-name-label" for="shipment-existing-select">Поставка</label>
+      <select id="shipment-existing-select" class="shipment-name-input"></select>
+      <div class="modal-actions modal-actions-shipment">
+        <button type="button" class="btn btn-shipment-create" id="shipment-existing-modal-add-btn">Добавить и отгрузить</button>
+        <button type="button" class="btn btn-shipment-close" id="shipment-existing-modal-close">Закрыть</button>
+      </div>
+    </div>
   </div>
 {% endblock %}

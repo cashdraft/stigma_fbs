@@ -11,6 +11,12 @@ document.addEventListener("DOMContentLoaded", () => {
   const shipmentOrderInputs = document.getElementById("shipment-order-inputs");
   const shipmentNameHidden = document.getElementById("shipment-name-field");
   const shipmentOpenBtn = document.getElementById("shipment-open-btn");
+
+  const shipmentAddForm = document.getElementById("shipment-add-form");
+  const shipmentOrderInputsAdd = document.getElementById("shipment-order-inputs-add");
+  const shipmentExistingHidden = document.getElementById("shipment-existing-id-field");
+  const shipmentAddOpenBtn = document.getElementById("shipment-add-open-btn");
+  const shipmentExistingSelect = document.getElementById("shipment-existing-select");
   const selectPageBtn = document.getElementById("bulk-select-page");
   const clearBtn = document.getElementById("bulk-clear");
   const loadBtn = document.getElementById("btn-load-more");
@@ -22,7 +28,55 @@ document.addEventListener("DOMContentLoaded", () => {
   const shipmentModalClose = document.getElementById("shipment-modal-close");
   const shipmentModalX = document.getElementById("shipment-modal-x");
 
+  const shipmentExistingModal = document.getElementById("shipment-existing-modal");
+  const shipmentExistingModalAddBtn = document.getElementById("shipment-existing-modal-add-btn");
+  const shipmentExistingModalClose = document.getElementById("shipment-existing-modal-close");
+  const shipmentExistingModalX = document.getElementById("shipment-existing-modal-x");
+
   let nextPage = parseInt(root.dataset.nextPage || "0", 10) || 0;
+
+  const ORDERS_FOCUS_Q_KEY = "stigma_fbs_orders_focus_q";
+  let ordersSearchInput = null;
+
+  const filtersForm = root.querySelector("#orders-filters");
+  if (filtersForm) {
+    const qInput = filtersForm.querySelector('input[name="q"]');
+    ordersSearchInput = qInput || null;
+    let qDebounce = null;
+
+    const submitFilters = (opts = {}) => {
+      if (opts.focusSearch) {
+        try {
+          sessionStorage.setItem(ORDERS_FOCUS_Q_KEY, "1");
+        } catch (_) {
+          /* игнорируем private mode и т.п. */
+        }
+      }
+      filtersForm.submit();
+    };
+
+    filtersForm.addEventListener("change", (e) => {
+      const el = e.target;
+      if (!el || !el.name) return;
+      if (el.name === "status" || el.name === "date_from" || el.name === "date_to") {
+        submitFilters();
+      }
+    });
+
+    if (qInput) {
+      qInput.addEventListener("input", () => {
+        clearTimeout(qDebounce);
+        qDebounce = setTimeout(() => submitFilters({ focusSearch: true }), 400);
+      });
+      qInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          clearTimeout(qDebounce);
+          submitFilters({ focusSearch: true });
+        }
+      });
+    }
+  }
 
   function orderWordRu(n) {
     const mod10 = n % 10;
@@ -51,6 +105,20 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!shipmentModal) return;
     shipmentModal.classList.add("modal-overlay--hidden");
     shipmentModal.setAttribute("aria-hidden", "true");
+    document.body.style.overflow = "";
+  }
+
+  function openExistingModal() {
+    if (!shipmentExistingModal) return;
+    shipmentExistingModal.classList.remove("modal-overlay--hidden");
+    shipmentExistingModal.setAttribute("aria-hidden", "false");
+    document.body.style.overflow = "hidden";
+  }
+
+  function closeExistingModal() {
+    if (!shipmentExistingModal) return;
+    shipmentExistingModal.classList.add("modal-overlay--hidden");
+    shipmentExistingModal.setAttribute("aria-hidden", "true");
     document.body.style.overflow = "";
   }
 
@@ -95,6 +163,17 @@ document.addEventListener("DOMContentLoaded", () => {
         input.name = "order_ids";
         input.value = cb.value;
         shipmentOrderInputs.appendChild(input);
+      });
+    }
+
+    if (shipmentOrderInputsAdd) {
+      shipmentOrderInputsAdd.innerHTML = "";
+      sel.forEach((cb) => {
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = "order_ids";
+        input.value = cb.value;
+        shipmentOrderInputsAdd.appendChild(input);
       });
     }
   }
@@ -157,6 +236,70 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  async function fetchAvailableShipmentsForAwaitingDeliver() {
+    const res = await fetch("/orders/shipment/available");
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    return (data && data.shipments) || [];
+  }
+
+  if (shipmentAddOpenBtn) {
+    shipmentAddOpenBtn.addEventListener("click", async () => {
+      const n = selected().length;
+      if (n === 0 || !shipmentAddForm || !shipmentExistingModal) return;
+
+      sync();
+      if (shipmentExistingHidden) shipmentExistingHidden.value = "";
+
+      openExistingModal();
+
+      if (!shipmentExistingSelect) return;
+      shipmentExistingSelect.innerHTML = "";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Загрузка...";
+      shipmentExistingSelect.appendChild(placeholder);
+
+      let shipments = [];
+      try {
+        shipments = await fetchAvailableShipmentsForAwaitingDeliver();
+      } catch {
+        shipments = [];
+      }
+
+      shipmentExistingSelect.innerHTML = "";
+      if (!shipments.length) {
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "Нет подходящих поставок";
+        opt.disabled = true;
+        shipmentExistingSelect.appendChild(opt);
+        if (shipmentExistingModalAddBtn) shipmentExistingModalAddBtn.disabled = true;
+        return;
+      }
+
+      shipmentExistingSelect.appendChild(placeholder);
+      shipments.forEach((s) => {
+        const opt = document.createElement("option");
+        opt.value = String(s.id);
+        opt.textContent = s.name || String(s.id);
+        shipmentExistingSelect.appendChild(opt);
+      });
+
+      if (shipmentExistingModalAddBtn) shipmentExistingModalAddBtn.disabled = false;
+    });
+  }
+
+  if (shipmentExistingModalAddBtn && shipmentExistingSelect && shipmentAddForm) {
+    shipmentExistingModalAddBtn.addEventListener("click", () => {
+      const id = shipmentExistingSelect.value || "";
+      if (!id) return;
+      if (shipmentExistingHidden) shipmentExistingHidden.value = id;
+      sync();
+      shipmentAddForm.submit();
+    });
+  }
+
   function submitShipmentForm() {
     if (!shipmentForm || !shipmentNameInput || !shipmentNameHidden) return;
     const name = shipmentNameInput.value.trim();
@@ -201,6 +344,25 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  if (shipmentExistingModal) {
+    shipmentExistingModal.addEventListener("click", (e) => {
+      if (e.target === shipmentExistingModal) closeExistingModal();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && shipmentExistingModal && !shipmentExistingModal.classList.contains("modal-overlay--hidden")) {
+        closeExistingModal();
+      }
+    });
+  }
+
+  if (shipmentExistingModalClose) {
+    shipmentExistingModalClose.addEventListener("click", () => closeExistingModal());
+  }
+
+  if (shipmentExistingModalX) {
+    shipmentExistingModalX.addEventListener("click", () => closeExistingModal());
+  }
+
   function loadMoreQuery(page) {
     const p = new URLSearchParams();
     p.set("status", root.dataset.filterStatus || "all");
@@ -242,6 +404,21 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       sync();
     });
+  }
+
+  if (ordersSearchInput) {
+    try {
+      if (sessionStorage.getItem(ORDERS_FOCUS_Q_KEY) === "1") {
+        sessionStorage.removeItem(ORDERS_FOCUS_Q_KEY);
+        setTimeout(() => {
+          ordersSearchInput.focus();
+          const n = ordersSearchInput.value.length;
+          if (typeof ordersSearchInput.setSelectionRange === "function") {
+            ordersSearchInput.setSelectionRange(n, n);
+          }
+        }, 0);
+      }
+    } catch (_) {}
   }
 
   sync();
