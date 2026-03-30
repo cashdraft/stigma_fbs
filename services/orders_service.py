@@ -360,11 +360,24 @@ class OrdersService:
     def _upsert_order(self, conn, order: Dict[str, Any]) -> Tuple[bool, int]:
         now = datetime.utcnow().isoformat()
         row = conn.execute(
-            "SELECT id FROM orders WHERE marketplace = ? AND posting_number = ?",
+            "SELECT id, status, shipment_id FROM orders WHERE marketplace = ? AND posting_number = ?",
             (order["marketplace"], order["posting_number"]),
         ).fetchone()
 
         if row:
+            incoming_status = order["status"]
+            current_status = str(row["status"] or "")
+            current_shipment_id = row["shipment_id"]
+            # Ozon may return stale awaiting_packaging for a short time right after ship.
+            # If the order is already attached to a shipment and locally moved to awaiting_deliver,
+            # do not regress it back to awaiting_packaging on this sync tick.
+            if (
+                incoming_status == "awaiting_packaging"
+                and current_status == "awaiting_deliver"
+                and current_shipment_id is not None
+            ):
+                incoming_status = "awaiting_deliver"
+
             conn.execute(
                 """
                 UPDATE orders SET
@@ -375,7 +388,7 @@ class OrdersService:
                 """,
                 (
                     order["order_number"],
-                    order["status"],
+                    incoming_status,
                     order["substatus"],
                     order["created_at"],
                     order["shipment_date"],
@@ -893,6 +906,7 @@ class OrdersService:
                 [*ids, "awaiting_packaging"],
             ).fetchall()
             eligible_ids = [int(r["id"]) for r in eligible_rows]
+            source_postings = [str(r["posting_number"] or "") for r in eligible_rows if str(r["posting_number"] or "")]
 
             # Ensure user action is explicit/consistent.
             if len(eligible_ids) != len(ids):
@@ -945,6 +959,7 @@ class OrdersService:
                 "shipment_name": srow["name"],
                 "count": len(eligible_ids),
                 "ozon_ship_requests": n_ozon,
+                "source_postings": source_postings,
             }
         except Exception:
             conn.rollback()
@@ -1029,6 +1044,7 @@ class OrdersService:
                     [*eligible_for_status, "awaiting_packaging"],
                 ).fetchall()
 
+                source_postings = [str(r["posting_number"] or "") for r in posting_rows if str(r["posting_number"] or "")]
                 for orow in posting_rows:
                     oid = int(orow["id"])
                     posting_number = str(orow["posting_number"] or "")
@@ -1087,6 +1103,7 @@ class OrdersService:
                 "count": len(ids),
                 "status_moved_to_awaiting_deliver": len(eligible_for_status),
                 "ozon_ship_requests": n_shipped if ship_after else 0,
+                "source_postings": source_postings if ship_after and eligible_for_status else [],
             }
         except sqlite3.IntegrityError:
             conn.rollback()
@@ -1094,6 +1111,65 @@ class OrdersService:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def attach_split_children_to_shipment(
+        self,
+        shipment_id: int,
+        source_postings: List[str],
+        marketplace: str = "ozon",
+    ) -> int:
+        """
+        После split на Ozon появляются новые postings (дети) с parent_posting_number.
+        Привязываем такие локальные заказы к нашей shipment_id.
+        """
+        parents = {str(p or "").strip() for p in source_postings if str(p or "").strip()}
+        if not shipment_id or not parents:
+            return 0
+
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, raw_json
+                FROM orders
+                WHERE marketplace = ?
+                """,
+                [marketplace],
+            ).fetchall()
+
+            matched_ids: List[int] = []
+            for r in rows:
+                raw = r["raw_json"]
+                if not raw:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    continue
+                parent = str((payload or {}).get("parent_posting_number") or "").strip()
+                if parent and parent in parents:
+                    matched_ids.append(int(r["id"]))
+
+            if not matched_ids:
+                return 0
+
+            ph = ",".join("?" * len(matched_ids))
+            cur = conn.execute(
+                f"""
+                UPDATE orders
+                SET shipment_id = ?,
+                    status = CASE
+                        WHEN status = 'awaiting_packaging' THEN 'awaiting_deliver'
+                        ELSE status
+                    END
+                WHERE id IN ({ph})
+                """,
+                [shipment_id, *matched_ids],
+            )
+            conn.commit()
+            return int(getattr(cur, "rowcount", 0) or 0)
         finally:
             conn.close()
 

@@ -33,6 +33,26 @@ body.has-bulk-bar {
   margin-right: 12px;
 }
 
+.brand-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-logo {
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.brand-ozon-logo {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  margin-left: 2px;
+}
+
 .actions-row {
   display: flex;
   gap: 12px;
@@ -765,6 +785,31 @@ tr.order-item-row--cont > td {
   letter-spacing: -0.01em;
 }
 
+.shipment-progress-list {
+  margin-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.shipment-progress-item {
+  font-size: 13px;
+  color: #667085;
+}
+
+.shipment-progress-item.is-active {
+  color: #175cd3;
+  font-weight: 600;
+}
+
+.shipment-progress-item.is-done {
+  color: #027a48;
+}
+
+.shipment-progress-item.is-error {
+  color: #b42318;
+  font-weight: 600;
+}
+
 .modal-subtitle-shipment {
   margin: 0 0 18px;
   font-size: 14px;
@@ -799,6 +844,10 @@ tr.order-item-row--cont > td {
 .modal-actions-shipment {
   justify-content: flex-start;
   gap: 12px;
+}
+
+.modal-actions-progress {
+  margin-top: 14px;
 }
 
 .btn-shipment-create {

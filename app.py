@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 from typing import List
 
 import fitz
@@ -31,12 +32,48 @@ def create_app():
 
     service = OrdersService()
 
+    def _sync_active_orders_with_retry() -> None:
+        """
+        Ozon может отдавать старый статус сразу после ship-вызова.
+        Делаем несколько коротких попыток синхронизации 2 активных статусов.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                service.sync_from_ozon(
+                    statuses=["awaiting_packaging", "awaiting_deliver"],
+                    since=None,
+                    to=None,
+                    limit=100,
+                    max_records=5000,
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                logging.exception(
+                    "Авто-синхронизация после ship не удалась (попытка %s/3)",
+                    attempt + 1,
+                )
+                if attempt < 2:
+                    time.sleep(1.2)
+        if last_exc:
+            raise last_exc
+
     @app.get("/")
     def index():
         summary = service.get_summary()
         return render_template("index.html", summary=summary)
 
+    @app.get("/logo.png")
+    def logo_png():
+        return send_file(os.path.join(app.root_path, "logo.png"), mimetype="image/png")
+
+    @app.get("/icon-ozon.png")
+    def icon_ozon_png():
+        return send_file(os.path.join(app.root_path, "icon-ozon.png"), mimetype="image/png")
+
     @app.get("/orders")
+    @app.get("/orders_ozon")
     def orders():
         status = request.args.get("status", "all")
         date_from = request.args.get("date_from", "")
@@ -89,6 +126,10 @@ def create_app():
         has_more = page < data["pages"]
         next_page = page + 1 if has_more else None
         return jsonify({"html": html, "has_more": has_more, "next_page": next_page})
+
+    @app.get("/orders_wb")
+    def orders_wb():
+        return render_template("orders_wb.html")
 
     @app.post("/orders/update")
     def update_orders():
@@ -236,6 +277,7 @@ def create_app():
 
     @app.post("/orders/shipment/create")
     def orders_shipment_create():
+        is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
         ids_raw = request.form.getlist("order_ids")
         next_url = request.form.get("next") or url_for("orders")
         if isinstance(next_url, str) and next_url.startswith("/") and not next_url.startswith("//"):
@@ -256,31 +298,39 @@ def create_app():
                 ship_after=True,
             )
             if result.get("ok"):
-                # Immediate reconciliation so split postings from Ozon appear locally right away.
+                # Always refresh active Ozon statuses right after create/ship:
+                # awaiting_packaging + awaiting_deliver (independent of split/non-split flow).
                 try:
-                    service.sync_from_ozon(
-                        status="all",
-                        statuses=["awaiting_packaging", "awaiting_deliver"],
-                        since=None,
-                        to=None,
-                        limit=100,
-                        max_records=5000,
+                    _sync_active_orders_with_retry()
+                    service.attach_split_children_to_shipment(
+                        shipment_id=int(result.get("shipment_id") or 0),
+                        source_postings=result.get("source_postings") or [],
                     )
                 except Exception:
                     logging.exception("Не удалось выполнить авто-синхронизацию после отгрузки")
-                flash(
-                    f"Поставка «{result['name']}» создана и отгружена, заказов: {result['count']}.",
-                    "success",
-                )
+                    msg = "Поставка создана, но авто-обновление заказов не удалось. Нажмите «Обновить заказы»."
+                    if is_ajax:
+                        return jsonify({"ok": False, "message": msg, "next_url": next_url}), 500
+                    flash(msg, "error")
+                success_msg = f"Поставка «{result['name']}» создана и отгружена, заказов: {result['count']}."
+                if is_ajax:
+                    return jsonify({"ok": True, "message": success_msg, "next_url": next_url})
+                flash(success_msg, "success")
             else:
-                flash(result.get("error") or "Не удалось создать поставку", "error")
+                err = result.get("error") or "Не удалось создать поставку"
+                if is_ajax:
+                    return jsonify({"ok": False, "message": err, "next_url": next_url}), 400
+                flash(err, "error")
         except OzonApiError as exc:
             logging.exception("Ошибка Ozon API при создании поставки/отгрузки")
+            if is_ajax:
+                return jsonify({"ok": False, "message": str(exc), "next_url": next_url}), 500
             flash(str(exc), "error")
         return redirect(next_url)
 
     @app.post("/orders/shipment/add-existing")
     def orders_shipment_add_existing():
+        is_ajax = request.headers.get("X-Requested-With") == "XMLHttpRequest"
         ids_raw = request.form.getlist("order_ids")
         next_url = request.form.get("next") or url_for("orders")
         if isinstance(next_url, str) and next_url.startswith("/") and not next_url.startswith("//"):
@@ -292,6 +342,8 @@ def create_app():
         try:
             shipment_id = int(shipment_id_raw)
         except (TypeError, ValueError):
+            if is_ajax:
+                return jsonify({"ok": False, "message": "Не выбрана поставка", "next_url": next_url}), 400
             flash("Не выбрана поставка", "error")
             return redirect(next_url)
 
@@ -308,26 +360,33 @@ def create_app():
                 order_ids=order_ids,
             )
             if result.get("ok"):
-                # Immediate reconciliation so split postings from Ozon appear locally right away.
+                # Always refresh active Ozon statuses right after add/ship:
+                # awaiting_packaging + awaiting_deliver (independent of split/non-split flow).
                 try:
-                    service.sync_from_ozon(
-                        status="all",
-                        statuses=["awaiting_packaging", "awaiting_deliver"],
-                        since=None,
-                        to=None,
-                        limit=100,
-                        max_records=5000,
+                    _sync_active_orders_with_retry()
+                    service.attach_split_children_to_shipment(
+                        shipment_id=int(result.get("shipment_id") or shipment_id),
+                        source_postings=result.get("source_postings") or [],
                     )
                 except Exception:
                     logging.exception("Не удалось выполнить авто-синхронизацию после добавления в поставку")
-                flash(
-                    f"Добавлено в поставку «{result.get('shipment_name') or shipment_id}», заказов: {result['count']}.",
-                    "success",
-                )
+                    msg = "Заказы добавлены в поставку, но авто-обновление не удалось. Нажмите «Обновить заказы»."
+                    if is_ajax:
+                        return jsonify({"ok": False, "message": msg, "next_url": next_url}), 500
+                    flash(msg, "error")
+                success_msg = f"Добавлено в поставку «{result.get('shipment_name') or shipment_id}», заказов: {result['count']}."
+                if is_ajax:
+                    return jsonify({"ok": True, "message": success_msg, "next_url": next_url})
+                flash(success_msg, "success")
             else:
-                flash(result.get("error") or "Не удалось добавить в поставку", "error")
+                err = result.get("error") or "Не удалось добавить в поставку"
+                if is_ajax:
+                    return jsonify({"ok": False, "message": err, "next_url": next_url}), 400
+                flash(err, "error")
         except OzonApiError as exc:
             logging.exception("Ошибка Ozon API при добавлении в существующую поставку")
+            if is_ajax:
+                return jsonify({"ok": False, "message": str(exc), "next_url": next_url}), 500
             flash(str(exc), "error")
 
         return redirect(next_url)

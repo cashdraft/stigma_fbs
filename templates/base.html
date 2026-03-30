@@ -8,10 +8,17 @@
   </head>
   <body>
     <header class="container topbar">
-      <h1><a href="{{ url_for('index') }}">Stigma FBS</a></h1>
+      <h1>
+        <a href="{{ url_for('index') }}" class="brand-link">
+          <img src="{{ url_for('logo_png') }}" alt="Stigma FBS" class="brand-logo" />
+          <span>Stigma FBS</span>
+          <img src="{{ url_for('icon_ozon_png') }}" alt="Ozon" class="brand-ozon-logo" />
+        </a>
+      </h1>
       <nav>
         <a href="{{ url_for('index') }}">Главная</a>
-        <a href="{{ url_for('orders') }}">Заказы</a>
+        <a href="{{ url_for('orders') }}">Заказы Ozon</a>
+        <a href="{{ url_for('orders_wb') }}">Заказы WB</a>
       </nav>
     </header>
 

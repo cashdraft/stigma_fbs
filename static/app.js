@@ -38,6 +38,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const splitConfirmOk = document.getElementById("split-confirm-ok");
   const splitConfirmCancel = document.getElementById("split-confirm-cancel");
   const splitConfirmModalX = document.getElementById("split-confirm-modal-x");
+  const shipmentProgressModal = document.getElementById("shipment-progress-modal");
+  const shipmentProgressStage = document.getElementById("shipment-progress-stage");
+  const shipmentProgressList = document.getElementById("shipment-progress-list");
+  const shipmentProgressClose = document.getElementById("shipment-progress-close");
   const updateOrdersForm = document.getElementById("update-orders-form");
   const updateOrdersBtn = document.getElementById("update-orders-btn");
   const updateAllOrdersBtn = document.getElementById("update-all-orders-btn");
@@ -246,6 +250,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   let pendingSplitAction = null;
+  let shipmentActionInFlight = false;
 
   function splitOrdersCount() {
     return selected().filter((cb) => {
@@ -299,12 +304,15 @@ document.addEventListener("DOMContentLoaded", () => {
     shipmentModal.classList.remove("modal-overlay--hidden");
     shipmentModal.setAttribute("aria-hidden", "false");
     document.body.style.overflow = "hidden";
+    if (shipmentModalCreate) shipmentModalCreate.disabled = false;
+    if (shipmentModalClose) shipmentModalClose.disabled = false;
     shipmentNameInput.focus();
     shipmentNameInput.select();
   }
 
   function closeShipmentModal() {
     if (!shipmentModal) return;
+    if (shipmentActionInFlight) return;
     shipmentModal.classList.add("modal-overlay--hidden");
     shipmentModal.setAttribute("aria-hidden", "true");
     document.body.style.overflow = "";
@@ -315,13 +323,104 @@ document.addEventListener("DOMContentLoaded", () => {
     shipmentExistingModal.classList.remove("modal-overlay--hidden");
     shipmentExistingModal.setAttribute("aria-hidden", "false");
     document.body.style.overflow = "hidden";
+    if (shipmentExistingModalAddBtn) shipmentExistingModalAddBtn.disabled = false;
+    if (shipmentExistingModalClose) shipmentExistingModalClose.disabled = false;
   }
 
   function closeExistingModal() {
     if (!shipmentExistingModal) return;
+    if (shipmentActionInFlight) return;
     shipmentExistingModal.classList.add("modal-overlay--hidden");
     shipmentExistingModal.setAttribute("aria-hidden", "true");
     document.body.style.overflow = "";
+  }
+
+  function openShipmentProgressModal(title, steps) {
+    if (!shipmentProgressModal || !shipmentProgressList || !shipmentProgressStage) return;
+    shipmentProgressModal.classList.remove("modal-overlay--hidden");
+    shipmentProgressModal.setAttribute("aria-hidden", "false");
+    document.body.style.overflow = "hidden";
+    shipmentProgressStage.textContent = title || "Обработка...";
+    shipmentProgressList.innerHTML = "";
+    steps.forEach((s, idx) => {
+      const line = document.createElement("div");
+      line.className = `shipment-progress-item${idx === 0 ? " is-active" : ""}`;
+      line.dataset.step = String(idx);
+      line.textContent = `• ${s}`;
+      shipmentProgressList.appendChild(line);
+    });
+    if (shipmentProgressClose) shipmentProgressClose.disabled = true;
+  }
+
+  function setShipmentProgress(stepIdx, state, stageText) {
+    if (shipmentProgressStage && stageText) shipmentProgressStage.textContent = stageText;
+    if (!shipmentProgressList) return;
+    const lines = Array.from(shipmentProgressList.querySelectorAll(".shipment-progress-item"));
+    lines.forEach((line, idx) => {
+      line.classList.remove("is-active", "is-done", "is-error");
+      if (idx < stepIdx) line.classList.add("is-done");
+      if (idx === stepIdx) {
+        if (state === "error") line.classList.add("is-error");
+        else if (state === "done") line.classList.add("is-done");
+        else line.classList.add("is-active");
+      }
+    });
+  }
+
+  function closeShipmentProgressModal() {
+    if (!shipmentProgressModal) return;
+    shipmentProgressModal.classList.add("modal-overlay--hidden");
+    shipmentProgressModal.setAttribute("aria-hidden", "true");
+    document.body.style.overflow = "";
+  }
+
+  async function submitShipmentActionAjax(formEl, progressTitle, hasSplit) {
+    const steps = hasSplit
+      ? [
+          "Передаем выбранные заказы",
+          "Разбиваем на отправления и отгружаем в Ozon",
+          "Обновляем статусы: Ожидают сборки/Ожидают отгрузки",
+        ]
+      : [
+          "Передаем выбранные заказы",
+          "Отгружаем в Ozon",
+          "Обновляем статусы: Ожидают сборки/Ожидают отгрузки",
+        ];
+    openShipmentProgressModal(progressTitle, steps);
+    setShipmentProgress(0, "active", "Передаем данные...");
+
+    const timers = [
+      setTimeout(() => setShipmentProgress(0, "done", "Передача выполнена"), 350),
+      setTimeout(() => setShipmentProgress(1, "active", hasSplit ? "Идет разбивка и отгрузка..." : "Идет отгрузка..."), 500),
+      setTimeout(() => setShipmentProgress(2, "active", "Идет обновление заказов..."), 2200),
+    ];
+
+    try {
+      const res = await fetch(formEl.action, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+        body: new FormData(formEl),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error((data && data.message) || `Ошибка ${res.status}`);
+      setShipmentProgress(2, "done", data.message || "Готово");
+      setShipmentProgress(3, "done", "Готово");
+      if (shipmentProgressClose) shipmentProgressClose.disabled = false;
+      setTimeout(() => {
+        const next = (data && data.next_url) || window.location.pathname + window.location.search;
+        if (next === window.location.pathname + window.location.search) {
+          window.location.reload();
+          return;
+        }
+        window.location.assign(next);
+      }, 700);
+    } catch (err) {
+      setShipmentProgress(1, "error", `Ошибка: ${err.message || "неизвестно"}`);
+      if (shipmentProgressClose) shipmentProgressClose.disabled = false;
+      throw err;
+    } finally {
+      timers.forEach((t) => clearTimeout(t));
+    }
   }
 
   function selected() {
@@ -493,19 +592,33 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   if (shipmentExistingModalAddBtn && shipmentExistingSelect && shipmentAddForm) {
-    shipmentExistingModalAddBtn.addEventListener("click", () => {
-      withSplitConfirm(() => {
+    shipmentExistingModalAddBtn.addEventListener("click", async () => {
+      withSplitConfirm(async () => {
+        if (shipmentActionInFlight) return;
         const id = shipmentExistingSelect.value || "";
         if (!id) return;
         if (shipmentExistingHidden) shipmentExistingHidden.value = id;
         sync();
-        shipmentAddForm.submit();
+        const hasSplit = splitOrdersCount() > 0;
+        if (shipmentExistingModalAddBtn) shipmentExistingModalAddBtn.disabled = true;
+        if (shipmentExistingModalClose) shipmentExistingModalClose.disabled = true;
+        closeExistingModal();
+        shipmentActionInFlight = true;
+        try {
+          await submitShipmentActionAjax(shipmentAddForm, "Добавляем в существующую поставку", hasSplit);
+        } catch (_) {
+          shipmentActionInFlight = false;
+          if (shipmentExistingModalAddBtn) shipmentExistingModalAddBtn.disabled = false;
+          if (shipmentExistingModalClose) shipmentExistingModalClose.disabled = false;
+          openExistingModal();
+        }
       });
     });
   }
 
-  function submitShipmentForm() {
+  async function submitShipmentForm() {
     if (!shipmentForm || !shipmentNameInput || !shipmentNameHidden) return;
+    if (shipmentActionInFlight) return;
     const name = shipmentNameInput.value.trim();
     if (!name) {
       shipmentNameInput.focus();
@@ -513,12 +626,24 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     shipmentNameHidden.value = name;
     sync();
-    shipmentForm.submit();
+    const hasSplit = splitOrdersCount() > 0;
+    if (shipmentModalCreate) shipmentModalCreate.disabled = true;
+    if (shipmentModalClose) shipmentModalClose.disabled = true;
+    closeShipmentModal();
+    shipmentActionInFlight = true;
+    try {
+      await submitShipmentActionAjax(shipmentForm, "Создаем поставку", hasSplit);
+    } catch (_) {
+      shipmentActionInFlight = false;
+      if (shipmentModalCreate) shipmentModalCreate.disabled = false;
+      if (shipmentModalClose) shipmentModalClose.disabled = false;
+      openShipmentModal();
+    }
   }
 
   if (shipmentModalCreate && shipmentForm) {
-    shipmentModalCreate.addEventListener("click", () => {
-      withSplitConfirm(() => submitShipmentForm());
+    shipmentModalCreate.addEventListener("click", async () => {
+      withSplitConfirm(async () => submitShipmentForm());
     });
   }
 
@@ -526,7 +651,7 @@ document.addEventListener("DOMContentLoaded", () => {
     shipmentNameInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        withSplitConfirm(() => submitShipmentForm());
+        withSplitConfirm(async () => submitShipmentForm());
       }
     });
   }
@@ -594,6 +719,10 @@ document.addEventListener("DOMContentLoaded", () => {
         closeSplitConfirm();
       }
     });
+  }
+
+  if (shipmentProgressClose) {
+    shipmentProgressClose.addEventListener("click", () => closeShipmentProgressModal());
   }
 
   function loadMoreQuery(page) {

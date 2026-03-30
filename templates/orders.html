@@ -218,4 +218,15 @@
       </div>
     </div>
   </div>
+
+  <div id="shipment-progress-modal" class="modal-overlay modal-overlay--hidden" role="dialog" aria-modal="true" aria-labelledby="shipment-progress-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog--shipment">
+      <h2 id="shipment-progress-title" class="modal-title-shipment">Обработка заказа</h2>
+      <p class="modal-subtitle-shipment" id="shipment-progress-stage">Подготовка...</p>
+      <div class="shipment-progress-list" id="shipment-progress-list"></div>
+      <div class="modal-actions modal-actions-shipment modal-actions-progress">
+        <button type="button" class="btn btn-shipment-close" id="shipment-progress-close" disabled>Закрыть</button>
+      </div>
+    </div>
+  </div>
 {% endblock %}
