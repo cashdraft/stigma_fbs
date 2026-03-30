@@ -3,6 +3,7 @@ import os
 import re
 from typing import List
 
+import fitz
 from flask import Flask, flash, jsonify, redirect, render_template, request, send_file, url_for
 
 from api_clients.ozon_client import OzonApiError
@@ -51,10 +52,12 @@ def create_app():
             page=1,
             per_page=per_page,
         )
+        top_shipments = service.get_shipments_with_awaiting_deliver_orders()
         has_more = data["page"] < data["pages"]
         return render_template(
             "orders.html",
             data=data,
+            top_shipments=top_shipments,
             filters={
                 "status": status,
                 "date_from": date_from,
@@ -90,13 +93,20 @@ def create_app():
     @app.post("/orders/update")
     def update_orders():
         status = request.form.get("status", "all")
+        sync_scope = (request.form.get("sync_scope") or "active").strip()
         since = request.form.get("since", "")
         to = request.form.get("to", "")
         limit = parse_int(request.form.get("limit"), 100, min_value=1, max_value=200)
+        sync_statuses = (
+            ["awaiting_packaging", "awaiting_deliver", "delivering"]
+            if sync_scope == "all"
+            else ["awaiting_packaging", "awaiting_deliver"]
+        )
 
         try:
             result = service.sync_from_ozon(
                 status=status,
+                statuses=sync_statuses,
                 since=since or None,
                 to=to or None,
                 limit=limit,
@@ -115,6 +125,47 @@ def create_app():
 
         return redirect(url_for("orders"))
 
+    @app.post("/orders/update-json")
+    def update_orders_json():
+        status = request.form.get("status", "all")
+        sync_scope = (request.form.get("sync_scope") or "active").strip()
+        since = request.form.get("since", "")
+        to = request.form.get("to", "")
+        limit = parse_int(request.form.get("limit"), 100, min_value=1, max_value=200)
+        sync_statuses = (
+            ["awaiting_packaging", "awaiting_deliver", "delivering"]
+            if sync_scope == "all"
+            else ["awaiting_packaging", "awaiting_deliver"]
+        )
+
+        try:
+            result = service.sync_from_ozon(
+                status=status,
+                statuses=sync_statuses,
+                since=since or None,
+                to=to or None,
+                limit=limit,
+                max_records=5000,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "scope": sync_scope,
+                    "message": (
+                        f"Готово. Создано: {result.get('created', 0)}, "
+                        f"обновлено: {result.get('updated', 0)}, "
+                        f"удалено: {result.get('deleted', 0)}."
+                    ),
+                    "result": result,
+                }
+            )
+        except OzonApiError as exc:
+            logging.exception("Ошибка Ozon API")
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        except Exception:
+            logging.exception("Неожиданная ошибка при обновлении заказов")
+            return jsonify({"ok": False, "message": "Не удалось получить данные из Ozon API"}), 500
+
     @app.get("/orders/<int:order_id>/label.pdf")
     def order_label_pdf(order_id: int):
         rel = service.ensure_order_label_pdf_file(order_id)
@@ -126,6 +177,52 @@ def create_app():
         safe = re.sub(r"[^\w\-.]+", "_", posting, flags=re.UNICODE)[:120]
         dl = f"etiketka_{safe}.pdf"
         return send_file(path, mimetype="application/pdf", as_attachment=True, download_name=dl)
+
+    @app.get("/orders/<int:order_id>/ozon-label.pdf")
+    def order_ozon_label_pdf(order_id: int):
+        info = service.get_order_posting_and_status(order_id)
+        if not info or not info.get("posting_number"):
+            flash("Заказ не найден или нет posting_number.", "error")
+            return redirect(request.referrer or url_for("orders"))
+        if info.get("status") != "awaiting_deliver":
+            flash("Этикетка Ozon доступна только для статуса «Ожидает отгрузки».", "error")
+            return redirect(request.referrer or url_for("orders"))
+
+        posting = info["posting_number"]
+        try:
+            pdf = service.client.get_fbs_package_label_pdf(posting)
+        except OzonApiError as exc:
+            logging.exception("Ошибка получения этикетки Ozon")
+            flash(str(exc), "error")
+            return redirect(request.referrer or url_for("orders"))
+
+        # Some Ozon labels come in portrait orientation but are intended for landscape view.
+        # Normalize to landscape for easier printing/scanning.
+        try:
+            doc = fitz.open(stream=pdf, filetype="pdf")
+            changed = False
+            for page in doc:
+                rect = page.rect
+                if rect.height > rect.width:
+                    # Rotate counter-clockwise to keep text upright in landscape.
+                    page.set_rotation((page.rotation + 270) % 360)
+                    changed = True
+            if changed:
+                pdf = doc.tobytes()
+            doc.close()
+        except Exception:
+            logging.exception("Не удалось нормализовать ориентацию этикетки Ozon")
+
+        safe = re.sub(r"[^\w\-.]+", "_", posting, flags=re.UNICODE)[:120]
+        dl = f"ozon_posting_label_{safe}.pdf"
+        from io import BytesIO
+
+        return send_file(
+            BytesIO(pdf),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=dl,
+        )
 
     @app.get("/orders/shipment/next-name")
     def orders_shipment_next_name():
@@ -159,6 +256,18 @@ def create_app():
                 ship_after=True,
             )
             if result.get("ok"):
+                # Immediate reconciliation so split postings from Ozon appear locally right away.
+                try:
+                    service.sync_from_ozon(
+                        status="all",
+                        statuses=["awaiting_packaging", "awaiting_deliver"],
+                        since=None,
+                        to=None,
+                        limit=100,
+                        max_records=5000,
+                    )
+                except Exception:
+                    logging.exception("Не удалось выполнить авто-синхронизацию после отгрузки")
                 flash(
                     f"Поставка «{result['name']}» создана и отгружена, заказов: {result['count']}.",
                     "success",
@@ -199,6 +308,18 @@ def create_app():
                 order_ids=order_ids,
             )
             if result.get("ok"):
+                # Immediate reconciliation so split postings from Ozon appear locally right away.
+                try:
+                    service.sync_from_ozon(
+                        status="all",
+                        statuses=["awaiting_packaging", "awaiting_deliver"],
+                        since=None,
+                        to=None,
+                        limit=100,
+                        max_records=5000,
+                    )
+                except Exception:
+                    logging.exception("Не удалось выполнить авто-синхронизацию после добавления в поставку")
                 flash(
                     f"Добавлено в поставку «{result.get('shipment_name') or shipment_id}», заказов: {result['count']}.",
                     "success",
@@ -213,8 +334,7 @@ def create_app():
 
     @app.get("/shipments")
     def shipments():
-        items = service.get_shipments_with_awaiting_deliver_orders()
-        return render_template("shipments.html", shipments=items)
+        return redirect(url_for("orders"))
 
     @app.get("/shipments/<int:shipment_id>")
     def shipment_detail(shipment_id: int):

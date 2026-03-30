@@ -12,67 +12,126 @@
     data-has-more="{{ 'true' if has_more else 'false' }}"
   >
   <section class="actions-row">
-    <form method="post" action="{{ url_for('update_orders') }}" class="inline-form">
+    <form method="post" action="{{ url_for('update_orders') }}" class="inline-form" id="update-orders-form">
       <input type="hidden" name="status" value="{{ filters.status }}" />
       <input type="hidden" name="since" value="{{ filters.date_from }}" />
       <input type="hidden" name="to" value="{{ filters.date_to }}" />
       <input type="hidden" name="limit" value="100" />
-      <button type="submit" class="btn">Обновить заказы</button>
+      <input type="hidden" name="sync_scope" value="active" id="update-orders-scope" />
+      <button type="submit" class="btn" id="update-orders-btn">Обновить заказы</button>
+      <button type="submit" class="btn btn-secondary" id="update-all-orders-btn">Обновить все заказы</button>
     </form>
+    <span class="muted" id="update-orders-status" aria-live="polite"></span>
   </section>
 
-  <form method="get" action="{{ url_for('orders') }}" class="filters" id="orders-filters">
-    <label>
-      Статус
-      <select name="status">
-        <option value="all" {% if filters.status == 'all' %}selected{% endif %}>Все</option>
-        {% for opt in data.status_options %}
-          <option value="{{ opt.value }}" {% if filters.status == opt.value %}selected{% endif %}>{{ opt.label }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>
-      От даты
-      <input type="date" name="date_from" value="{{ filters.date_from }}" autocomplete="off" />
-    </label>
-    <label>
-      До даты
-      <input type="date" name="date_to" value="{{ filters.date_to }}" autocomplete="off" />
-    </label>
-    <label>
-      Поиск
-      <input type="search" name="q" value="{{ filters.q }}" placeholder="posting/order/SKU" enterkeyhint="search" autocomplete="off" />
-    </label>
+  {% if top_shipments %}
+    <div class="shipments-toolbar" aria-label="Существующие поставки">
+      {% for s in top_shipments %}
+        <a class="shipment-chip" href="{{ url_for('shipment_detail', shipment_id=s.id) }}">
+          <span>{{ s.name }}</span>
+          <span class="shipment-chip-count">{{ s.orders_count }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <div class="status-toolbar">
+    <div class="status-tabs" aria-label="Фильтр по статусу">
+      {% for tab in data.status_tabs %}
+        <a
+          class="status-tab{% if filters.status == tab.value %} status-tab--active{% endif %}"
+          href="{{ url_for('orders', status=tab.value, date_from=filters.date_from, date_to=filters.date_to, q=filters.q) }}"
+        >
+          <span>{{ tab.label }}</span>
+          <span class="status-tab-count">{{ tab.count }}</span>
+        </a>
+      {% endfor %}
+    </div>
+
+    <div class="period-control" id="period-control">
+      <button
+        type="button"
+        class="period-btn{% if filters.date_from or filters.date_to %} period-btn--selected{% endif %}"
+        id="period-btn"
+      >
+        <span class="period-btn-title">Период</span>
+        <span class="period-btn-dates{% if not filters.date_from and not filters.date_to %} period-btn-dates--hidden{% endif %}" id="period-btn-dates">
+          : {{ filters.date_from or '...' }} – {{ filters.date_to or '...' }}
+        </span>
+        <span class="period-btn-sep{% if not filters.date_from and not filters.date_to %} period-btn-sep--hidden{% endif %}" id="period-btn-sep">·</span>
+        <span class="period-btn-reset{% if not filters.date_from and not filters.date_to %} period-btn-reset--hidden{% endif %}" id="period-btn-reset">Сбросить</span>
+      </button>
+      <div class="period-popover period-popover--hidden" id="period-popover">
+        <label>
+          С даты
+          <input type="date" id="period-from" value="{{ filters.date_from }}" />
+        </label>
+        <label>
+          По дату
+          <input type="date" id="period-to" value="{{ filters.date_to }}" />
+        </label>
+        <div class="period-actions">
+          <button type="button" class="btn btn-secondary" id="period-cancel">Закрыть</button>
+          <button type="button" class="btn" id="period-apply">Применить</button>
+        </div>
+      </div>
+    </div>
+
+    <form method="get" action="{{ url_for('orders') }}" id="orders-search-form" class="status-search-form">
+      <input type="hidden" name="status" value="{{ filters.status }}" />
+      <input type="hidden" name="date_from" id="search-date-from" value="{{ filters.date_from }}" />
+      <input type="hidden" name="date_to" id="search-date-to" value="{{ filters.date_to }}" />
+      <span class="status-search-icon" aria-hidden="true">🔍</span>
+      <input
+        type="search"
+        name="q"
+        id="orders-search-input"
+        class="status-search-input"
+        value="{{ filters.q }}"
+        placeholder="Поиск posting/order/SKU"
+        enterkeyhint="search"
+        autocomplete="off"
+      />
+    </form>
+  </div>
+
+  <form method="get" action="{{ url_for('orders') }}" class="filters filters--hidden" id="orders-filters">
+    <input type="hidden" name="status" value="{{ filters.status }}" />
+    <input type="hidden" name="q" value="{{ filters.q }}" />
+    <input type="hidden" name="date_from" value="{{ filters.date_from }}" autocomplete="off" />
+    <input type="hidden" name="date_to" value="{{ filters.date_to }}" autocomplete="off" />
     <noscript>
       <button type="submit" class="btn">Применить</button>
     </noscript>
   </form>
 
-  <p class="muted">Найдено заказов: {{ data.total }}</p>
+  <p class="muted orders-found">Найдено заказов: {{ data.total }}</p>
 
   <table class="orders-table">
     <thead>
       <tr>
         <th class="col-check">
-          <input type="checkbox" id="select-all-orders" class="order-cb-master" title="Выбрать все на странице" aria-label="Выбрать все на странице" />
+          <input
+            type="checkbox"
+            id="select-all-orders"
+            class="order-cb-master"
+            title="Выбрать все на странице"
+            aria-label="Выбрать все на странице"
+            {% if filters.status in ['awaiting_deliver', 'delivering'] %}disabled{% endif %}
+          />
         </th>
-        <th>№ заказа</th>
+        <th>№</th>
         <th>Поставка</th>
         <th class="col-status">Статус</th>
         <th>Принят</th>
-        <th>Дата отгрузки</th>
-        <th>Тариф отгрузки</th>
+        <th>Тариф</th>
         <th>Фото</th>
-        <th>Товары</th>
-        <th>Количество</th>
         <th>Артикул</th>
         <th>Категория</th>
-        <th>Цвет</th>
         <th>Штрихкод</th>
-        <th>Размер пр.</th>
-        <th>Стоимость</th>
-        <th>Склад</th>
-        <th class="col-label-pdf" title="Этикетка PDF">Этик.</th>
+        <th>Размер</th>
+        <th class="col-label-pdf" title="Этикетка PDF">ШК</th>
+        <th class="col-label-pdf" title="Этикетка отправления Ozon">Ozon</th>
       </tr>
     </thead>
     <tbody id="orders-tbody">
@@ -82,7 +141,7 @@
         {% endwith %}
       {% else %}
         <tr>
-          <td colspan="18">Заказы не найдены</td>
+          <td colspan="13">Заказы не найдены</td>
         </tr>
       {% endif %}
     </tbody>
@@ -144,6 +203,18 @@
       <div class="modal-actions modal-actions-shipment">
         <button type="button" class="btn btn-shipment-create" id="shipment-existing-modal-add-btn">Добавить и отгрузить</button>
         <button type="button" class="btn btn-shipment-close" id="shipment-existing-modal-close">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="split-confirm-modal" class="modal-overlay modal-overlay--hidden" role="dialog" aria-modal="true" aria-labelledby="split-confirm-modal-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog--shipment">
+      <button type="button" class="modal-close" id="split-confirm-modal-x" aria-label="Закрыть">×</button>
+      <h2 id="split-confirm-modal-title" class="modal-title-shipment">Нужна разбивка на отправления</h2>
+      <p class="modal-subtitle-shipment" id="split-confirm-text">—</p>
+      <div class="modal-actions modal-actions-shipment">
+        <button type="button" class="btn btn-shipment-close" id="split-confirm-cancel">Отмена</button>
+        <button type="button" class="btn btn-shipment-create" id="split-confirm-ok">Продолжить</button>
       </div>
     </div>
   </div>

@@ -36,7 +36,26 @@ body.has-bulk-bar {
 .actions-row {
   display: flex;
   gap: 12px;
+  align-items: center;
   margin-bottom: 16px;
+}
+
+#update-orders-status {
+  font-size: 14px;
+  line-height: 1.2;
+  align-self: center;
+}
+
+#update-orders-status.status-progress {
+  color: #667085;
+}
+
+#update-orders-status.status-success {
+  color: #027a48;
+}
+
+#update-orders-status.status-error {
+  color: #b42318;
 }
 
 .btn {
@@ -75,9 +94,13 @@ body.has-bulk-bar {
 
 .filters {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
+}
+
+.filters--hidden {
+  display: none;
 }
 
 .filters label {
@@ -85,6 +108,222 @@ body.has-bulk-bar {
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
+}
+
+.status-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(200px, 260px);
+  align-items: end;
+  gap: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid #e4e7ec;
+  padding-bottom: 8px;
+}
+
+.shipments-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  overflow-x: auto;
+  padding: 2px 0 10px;
+  margin-bottom: 4px;
+}
+
+.shipment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  text-decoration: none;
+  color: #344054;
+  border: 1px solid #d0d5dd;
+  border-radius: 999px;
+  padding: 6px 10px;
+  white-space: nowrap;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.shipment-chip:hover {
+  border-color: #98a2b3;
+  background: #f9fafb;
+}
+
+.shipment-chip-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #eef2f6;
+  color: #667085;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 6px;
+}
+
+.period-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-self: center;
+  min-width: 0;
+}
+
+.period-btn {
+  border: 1px solid #d0d5dd;
+  color: #1d2939;
+  background: #fff;
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.period-btn:hover {
+  border-color: #98a2b3;
+  background: #f8fafc;
+}
+
+.period-btn--selected {
+  color: #1d2939;
+  border-color: #175cd3;
+  background: #eef4ff;
+}
+
+.period-btn-sep--hidden,
+.period-btn-reset--hidden,
+.period-btn-dates--hidden {
+  display: none;
+}
+
+.period-btn-dates {
+  color: #667085;
+  display: inline-block;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.period-btn-reset {
+  color: #175cd3;
+  font-weight: 600;
+}
+
+.period-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 1500;
+  width: 320px;
+  background: #fff;
+  border: 1px solid #d0d5dd;
+  border-radius: 12px;
+  box-shadow: 0 12px 28px rgba(16, 24, 40, 0.15);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.period-popover label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #667085;
+}
+
+.period-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.period-popover--hidden {
+  display: none;
+}
+
+.status-search-form {
+  width: 100%;
+  max-width: 260px;
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.status-search-input {
+  width: 100%;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 4px 0;
+  background: transparent;
+  font-size: 14px;
+  color: #1d2939;
+}
+
+.status-search-input::placeholder {
+  color: #98a2b3;
+}
+
+.status-search-input:focus {
+  outline: none;
+  border-bottom-color: #175cd3;
+}
+
+.status-search-icon {
+  color: #98a2b3;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.status-tabs {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.status-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-decoration: none;
+  color: #667085;
+  font-size: 14px;
+  padding: 4px 0;
+  border-bottom: 2px solid transparent;
+}
+
+.status-tab--active {
+  color: #1d2939;
+  border-bottom-color: #175cd3;
+}
+
+.status-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #eef2f6;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 6px;
 }
 
 input,
@@ -111,8 +350,22 @@ td {
   font-size: 14px;
 }
 
+.orders-table thead th {
+  text-align: left;
+  vertical-align: middle;
+}
+
 .col-status {
   text-align: center;
+  vertical-align: middle;
+}
+
+.col-posting,
+.shipment-cell {
+  vertical-align: middle;
+}
+
+.col-posting {
   vertical-align: middle;
 }
 
@@ -128,24 +381,37 @@ td {
 }
 
 .status--awaiting_packaging {
-  background: #fef3c7;
-  color: #92400e;
+  background: #f8f2e8;
+  color: #d97706;
 }
 
 .status--awaiting_deliver {
-  background: #dbeafe;
-  color: #1d4ed8;
+  background: #e6f4f5;
+  color: #0b8f94;
 }
 
 .status--delivering {
-  background: #d1fae5;
-  color: #047857;
+  background: #efedf9;
+  color: #6f63d9;
 }
 
 /* Одна миниатюра на строку; многострочные заказы — несколько <tr> с rowspan (см. order_rows). */
 .col-thumbs {
   width: 68px;
   vertical-align: middle;
+}
+
+.product-name-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.25;
+  color: #98a2b3;
+}
+
+.date-cell {
+  font-size: 14px;
+  line-height: 1.35;
+  white-space: nowrap;
 }
 
 tr.order-item-row--cont > td {
@@ -195,10 +461,35 @@ tr.order-item-row--cont > td {
   height: 6px;
   border-radius: 2px;
   background: #e4e7ec;
+  opacity: 1;
 }
 
 .tariff-seg-active {
-  background: #175cd3;
+  background: #22c55e;
+}
+
+.tariff-seg-active:nth-child(1) {
+  background: #22c55e;
+}
+
+.tariff-seg-active:nth-child(2) {
+  background: #84cc16;
+}
+
+.tariff-seg-active:nth-child(3) {
+  background: #facc15;
+}
+
+.tariff-seg-active:nth-child(4) {
+  background: #f97316;
+}
+
+.tariff-seg-active:nth-child(5) {
+  background: #ef4444;
+}
+
+.tariff-seg-active:nth-child(6) {
+  background: #dc2626;
 }
 
 .tariff-hint {
@@ -235,6 +526,10 @@ tr.order-item-row--cont > td {
 
 .muted {
   color: #667085;
+}
+
+.orders-found {
+  font-size: 14px;
 }
 
 .alerts {
@@ -537,6 +832,18 @@ tr.order-item-row--cont > td {
 .shipment-cell {
   max-width: 160px;
   word-break: break-word;
+}
+
+.shipment-link {
+  color: #175cd3;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.shipment-link:hover {
+  text-decoration: underline;
 }
 
 .col-label-pdf {

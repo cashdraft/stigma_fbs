@@ -23,11 +23,42 @@ STATUS_LABELS = {
 }
 
 SHIPMENT_NAME_PREFIX = "OZON_"
+RU_MONTHS_SHORT = {
+    1: "янв",
+    2: "фев",
+    3: "мар",
+    4: "апр",
+    5: "май",
+    6: "июн",
+    7: "июл",
+    8: "авг",
+    9: "сен",
+    10: "окт",
+    11: "ноя",
+    12: "дек",
+}
 
 
 def _shipment_date_prefix(d: Optional[date] = None) -> str:
     day = d or datetime.now().date()
     return f"{SHIPMENT_NAME_PREFIX}{day.strftime('%d.%m.%y')}/"
+
+
+def _format_ru_short_datetime(value: Optional[str]) -> str:
+    if not value:
+        return "-"
+    raw = str(value).strip()
+    if not raw:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = datetime.strptime(raw[:16].replace("T", " "), "%Y-%m-%d %H:%M")
+        except ValueError:
+            return raw[:16].replace("T", " ")
+    month = RU_MONTHS_SHORT.get(dt.month, "")
+    return f"{dt.day:02d} {month} {dt:%H:%M}"
 
 
 class OrdersService:
@@ -130,6 +161,7 @@ class OrdersService:
     def sync_from_ozon(
         self,
         status: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
         since: Optional[str] = None,
         to: Optional[str] = None,
         limit: int = 100,
@@ -140,11 +172,17 @@ class OrdersService:
         # синхронизируем сразу все 3 нужных статуса и затем очищаем базу от posting,
         # которых больше нет ни в одном из трёх статусов Ozon.
         main_statuses = ["awaiting_packaging", "awaiting_deliver", "delivering"]
-        statuses_to_fetch: List[str]
-        if status in (None, "all") or status in main_statuses:
-            statuses_to_fetch = main_statuses
+        statuses_to_fetch: List[str] = []
+        if statuses:
+            for s in statuses:
+                if s and s not in statuses_to_fetch:
+                    statuses_to_fetch.append(s)
+        elif status in (None, "all"):
+            statuses_to_fetch = main_statuses.copy()
+        elif status in main_statuses:
+            statuses_to_fetch = [status]
         else:
-            statuses_to_fetch = [status] if status else main_statuses
+            statuses_to_fetch = [status] if status else main_statuses.copy()
 
         now = datetime.now(timezone.utc)
         since_default = now - timedelta(days=30)
@@ -273,15 +311,15 @@ class OrdersService:
             # Cleanup: delete orders which are not present on Ozon anymore (within the same sync window),
             # but only for the 3 statuses we actually keep history for.
             deleted = 0
-            if not hit_cap and set(statuses_to_fetch) == set(main_statuses) and postings:
+            if not hit_cap and statuses_to_fetch:
                 posting_numbers = sorted(
                     {str(p.get("posting_number") or "") for p in postings if p.get("posting_number")}
                 )
+                conn.execute("DROP TABLE IF EXISTS tmp_ozon_postings")
+                conn.execute(
+                    "CREATE TEMP TABLE tmp_ozon_postings (posting_number TEXT PRIMARY KEY)"
+                )
                 if posting_numbers:
-                    conn.execute("DROP TABLE IF EXISTS tmp_ozon_postings")
-                    conn.execute(
-                        "CREATE TEMP TABLE tmp_ozon_postings (posting_number TEXT PRIMARY KEY)"
-                    )
                     chunk = 500
                     for i in range(0, len(posting_numbers), chunk):
                         part = posting_numbers[i : i + chunk]
@@ -290,17 +328,18 @@ class OrdersService:
                             [(x,) for x in part],
                         )
 
-                    cur_del = conn.execute(
-                        """
-                        DELETE FROM orders
-                        WHERE status IN ('awaiting_packaging', 'awaiting_deliver', 'delivering')
-                          AND created_at >= ?
-                          AND created_at <= ?
-                          AND posting_number NOT IN (SELECT posting_number FROM tmp_ozon_postings)
-                        """,
-                        (effective_since_iso, effective_to_iso),
-                    )
-                    deleted = int(getattr(cur_del, "rowcount", 0) or 0)
+                st_ph = ",".join("?" * len(statuses_to_fetch))
+                cur_del = conn.execute(
+                    f"""
+                    DELETE FROM orders
+                    WHERE status IN ({st_ph})
+                      AND created_at >= ?
+                      AND created_at <= ?
+                      AND posting_number NOT IN (SELECT posting_number FROM tmp_ozon_postings)
+                    """,
+                    [*statuses_to_fetch, effective_since_iso, effective_to_iso],
+                )
+                deleted = int(getattr(cur_del, "rowcount", 0) or 0)
 
             conn.commit()
         except Exception:
@@ -310,7 +349,13 @@ class OrdersService:
             conn.close()
 
         self.logger.info("Синхронизация заказов завершена: created=%s updated=%s", created, updated)
-        return {"created": created, "updated": updated, "total": len(postings), "deleted": deleted}
+        return {
+            "created": created,
+            "updated": updated,
+            "total": len(postings),
+            "deleted": deleted,
+            "synced_statuses": statuses_to_fetch,
+        }
 
     def _upsert_order(self, conn, order: Dict[str, Any]) -> Tuple[bool, int]:
         now = datetime.utcnow().isoformat()
@@ -506,6 +551,22 @@ class OrdersService:
         finally:
             conn.close()
 
+    def get_order_posting_and_status(self, order_id: int) -> Optional[Dict[str, str]]:
+        conn = get_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT posting_number, status FROM orders WHERE id = ?",
+                (order_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "posting_number": str(row["posting_number"] or ""),
+                "status": str(row["status"] or ""),
+            }
+        finally:
+            conn.close()
+
     def get_orders(
         self,
         status: str = "all",
@@ -561,10 +622,17 @@ class OrdersService:
                 SELECT
                     o.*,
                     COALESCE(SUM(oi.quantity), 0) as total_qty,
-                    s.name AS shipment_name
+                    s.name AS shipment_name,
+                    COALESCE(sc.orders_count, 0) AS shipment_orders_count
                 FROM orders o
                 LEFT JOIN order_items oi ON oi.order_id = o.id
                 LEFT JOIN shipments s ON s.id = o.shipment_id
+                LEFT JOIN (
+                    SELECT shipment_id, COUNT(*) AS orders_count
+                    FROM orders
+                    WHERE shipment_id IS NOT NULL
+                    GROUP BY shipment_id
+                ) sc ON sc.shipment_id = o.shipment_id
                 WHERE {where_sql}
                 GROUP BY o.id
                 ORDER BY o.created_at DESC
@@ -576,10 +644,30 @@ class OrdersService:
             statuses = conn.execute(
                 "SELECT status, COUNT(*) as cnt FROM orders GROUP BY status ORDER BY cnt DESC"
             ).fetchall()
+            total_all = conn.execute("SELECT COUNT(*) as cnt FROM orders").fetchone()["cnt"]
             status_options = [
                 {"value": s["status"], "label": STATUS_LABELS.get(s["status"], s["status"] or "-")}
                 for s in statuses
                 if s["status"]
+            ]
+            status_counts = {str(s["status"]): int(s["cnt"]) for s in statuses if s["status"]}
+            status_tabs = [
+                {
+                    "value": "awaiting_packaging",
+                    "label": "Ожидают сборки",
+                    "count": int(status_counts.get("awaiting_packaging", 0)),
+                },
+                {
+                    "value": "awaiting_deliver",
+                    "label": "Ожидают отгрузки",
+                    "count": int(status_counts.get("awaiting_deliver", 0)),
+                },
+                {
+                    "value": "delivering",
+                    "label": "Доставляются",
+                    "count": int(status_counts.get("delivering", 0)),
+                },
+                {"value": "all", "label": "Все", "count": int(total_all)},
             ]
 
             orders = [dict(r) for r in rows]
@@ -589,7 +677,12 @@ class OrdersService:
                     (order["id"],),
                 ).fetchall()
                 order["items"] = [dict(i) for i in items]
+                # Used by UI to warn about splitting into multiple shipments (like "Разделить заказ").
+                order["unit_count"] = sum(int(i.get("quantity") or 0) for i in order["items"])
+                order["has_multi_unit"] = order["unit_count"] > 1
                 order["status_label"] = STATUS_LABELS.get(order.get("status"), order.get("status") or "-")
+                order["created_at_display"] = _format_ru_short_datetime(order.get("created_at"))
+                order["shipment_date_display"] = _format_ru_short_datetime(order.get("shipment_date"))
                 tinfo = parse_shipment_tariff_from_raw(order.get("raw_json"))
                 order["tariff_label"] = tinfo["label"]
                 order["tariff_hint"] = tinfo["hint"]
@@ -599,6 +692,7 @@ class OrdersService:
             return {
                 "orders": orders,
                 "status_options": status_options,
+                "status_tabs": status_tabs,
                 "total": total,
                 "page": page,
                 "per_page": per_page,
@@ -711,9 +805,16 @@ class OrdersService:
                 """
                 SELECT
                     o.*,
-                    s.name AS shipment_name
+                    s.name AS shipment_name,
+                    COALESCE(sc.orders_count, 0) AS shipment_orders_count
                 FROM orders o
                 LEFT JOIN shipments s ON s.id = o.shipment_id
+                LEFT JOIN (
+                    SELECT shipment_id, COUNT(*) AS orders_count
+                    FROM orders
+                    WHERE shipment_id IS NOT NULL
+                    GROUP BY shipment_id
+                ) sc ON sc.shipment_id = o.shipment_id
                 WHERE o.shipment_id = ?
                   AND s.marketplace = ?
                 ORDER BY o.created_at DESC
@@ -732,6 +833,8 @@ class OrdersService:
                 order["status_label"] = STATUS_LABELS.get(
                     order.get("status"), order.get("status") or "-"
                 )
+                order["created_at_display"] = _format_ru_short_datetime(order.get("created_at"))
+                order["shipment_date_display"] = _format_ru_short_datetime(order.get("shipment_date"))
                 tinfo = parse_shipment_tariff_from_raw(order.get("raw_json"))
                 order["tariff_label"] = tinfo["label"]
                 order["tariff_hint"] = tinfo["hint"]
@@ -813,11 +916,15 @@ class OrdersService:
                 items_dicts = [dict(x) for x in items]
                 products = self._build_products_expanded_by_unit(items_dicts)
 
-                self.client.ship_fbs_posting(
-                    posting_number=posting_number,
-                    products=products or None,
-                )
-                n_ozon += 1
+                if not products:
+                    continue
+
+                for unit_product in products:
+                    self.client.ship_fbs_posting(
+                        posting_number=posting_number,
+                        products=[unit_product],
+                    )
+                    n_ozon += 1
 
             now = datetime.utcnow().isoformat()
             st_placeholders = ",".join("?" * len(eligible_ids))
@@ -938,11 +1045,17 @@ class OrdersService:
                     items_dicts = [dict(x) for x in items]
                     products = self._build_products_expanded_by_unit(items_dicts)
 
-                    self.client.ship_fbs_posting(
-                        posting_number=posting_number,
-                        products=products or None,
-                    )
-                    n_shipped += 1
+                    if not products:
+                        continue
+
+                    # Split into unit-level shipments (like "Разделить заказ"),
+                    # by shipping one unit at a time.
+                    for unit_product in products:
+                        self.client.ship_fbs_posting(
+                            posting_number=posting_number,
+                            products=[unit_product],
+                        )
+                        n_shipped += 1
 
                 # 2) After Ozon ship success, move local statuses.
                 st_placeholders = ",".join("?" * len(eligible_for_status))

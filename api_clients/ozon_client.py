@@ -31,6 +31,19 @@ class OzonClient:
         }
 
     def _post(self, path: str, payload: Dict[str, Any], timeout: Optional[int] = None) -> Dict[str, Any]:
+        response = self._post_response(path, payload, timeout=timeout)
+        try:
+            return response.json()
+        except ValueError as exc:
+            self.logger.exception("Некорректный JSON от Ozon API")
+            raise OzonApiError("Неожиданный формат ответа Ozon API") from exc
+
+    def _post_response(
+        self,
+        path: str,
+        payload: Dict[str, Any],
+        timeout: Optional[int] = None,
+    ) -> requests.Response:
         url = f"{self.base_url}{path}"
         wait = timeout if timeout is not None else self.timeout
         try:
@@ -50,12 +63,7 @@ class OzonClient:
         if response.status_code >= 400:
             self.logger.error("Ошибка Ozon API: %s %s", response.status_code, response.text)
             raise OzonApiError(f"Ozon API вернул ошибку {response.status_code}")
-
-        try:
-            return response.json()
-        except ValueError as exc:
-            self.logger.exception("Некорректный JSON от Ozon API")
-            raise OzonApiError("Неожиданный формат ответа Ozon API") from exc
+        return response
 
     @staticmethod
     def _to_iso8601(value: Optional[str], default: datetime, end_of_day: bool = False) -> str:
@@ -215,3 +223,36 @@ class OzonClient:
 
         # Ozon API response format is not strictly typed here; we pass through result.
         return self._post("/v4/posting/fbs/ship/package", payload)
+
+    def get_fbs_package_label_pdf(self, posting_number: str) -> bytes:
+        """Скачать PDF этикетки отправления Ozon для FBS posting."""
+        if not posting_number:
+            raise OzonApiError("Отсутствует posting_number для этикетки Ozon")
+
+        response = self._post_response(
+            "/v2/posting/fbs/package-label",
+            {"posting_number": [posting_number]},
+            timeout=60,
+        )
+        content = response.content or b""
+        ctype = (response.headers.get("Content-Type") or "").lower()
+        if "application/pdf" in ctype or content.startswith(b"%PDF"):
+            return content
+
+        # Some API gateways may return JSON with a file URL or embedded payload.
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise OzonApiError("Ozon вернул неожиданный формат этикетки (не PDF)") from exc
+
+        result = data.get("result")
+        if isinstance(result, str) and result.startswith("http"):
+            try:
+                r2 = requests.get(result, timeout=60)
+                r2.raise_for_status()
+            except requests.RequestException as exc:
+                raise OzonApiError("Не удалось скачать PDF этикетки Ozon по ссылке") from exc
+            if (r2.content or b"").startswith(b"%PDF"):
+                return r2.content
+
+        raise OzonApiError("Ozon не вернул PDF этикетки отправления")
