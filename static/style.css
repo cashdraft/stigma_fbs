@@ -60,6 +60,30 @@ body.has-bulk-bar {
   margin-bottom: 16px;
 }
 
+.shipment-actions-row {
+  justify-content: space-between;
+}
+
+.shipment-actions-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.shipment-actions-right {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.btn-shipment-top {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+}
+
 #update-orders-status {
   font-size: 14px;
   line-height: 1.2;

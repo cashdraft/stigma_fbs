@@ -59,6 +59,57 @@ def create_app():
         if last_exc:
             raise last_exc
 
+    def _normalize_ozon_label_orientation(pdf: bytes) -> bytes:
+        try:
+            doc = fitz.open(stream=pdf, filetype="pdf")
+            changed = False
+            for page in doc:
+                rect = page.rect
+                if rect.height > rect.width:
+                    page.set_rotation((page.rotation + 270) % 360)
+                    changed = True
+            if changed:
+                pdf = doc.tobytes()
+            doc.close()
+        except Exception:
+            logging.exception("Не удалось нормализовать ориентацию этикетки Ozon")
+        return pdf
+
+    def _normalize_pick_article(raw_offer_id: str) -> str:
+        """
+        Примеры:
+        BASE_3_1_697_B_M  -> 3_1_697_B
+        BASE_3_1_697_BB_M -> 3_1_697_B
+        """
+        s = str(raw_offer_id or "").strip()
+        if not s:
+            return "—"
+        def _latinize_color(c: str) -> str:
+            t = str(c or "").upper()[:1]
+            return (
+                t.replace("А", "A")
+                .replace("В", "B")
+                .replace("Е", "E")
+                .replace("К", "K")
+                .replace("М", "M")
+                .replace("Н", "H")
+                .replace("О", "O")
+                .replace("Р", "P")
+                .replace("С", "C")
+                .replace("Т", "T")
+                .replace("У", "Y")
+                .replace("Х", "X")
+            )
+
+        m = re.search(r"^[^_]+_(\d+)_(\d+)_(\d+)_([A-Za-zА-Яа-я])", s)
+        if m:
+            return f"{m.group(1)}_{m.group(2)}_{m.group(3)}_{_latinize_color(m.group(4))}"
+        parts = s.split("_")
+        if len(parts) >= 5:
+            tail = _latinize_color(parts[4] if parts[4] else "X")
+            return f"{parts[1]}_{parts[2]}_{parts[3]}_{tail}"
+        return s
+
     @app.get("/")
     def index():
         summary = service.get_summary()
@@ -237,22 +288,7 @@ def create_app():
             flash(str(exc), "error")
             return redirect(request.referrer or url_for("orders"))
 
-        # Some Ozon labels come in portrait orientation but are intended for landscape view.
-        # Normalize to landscape for easier printing/scanning.
-        try:
-            doc = fitz.open(stream=pdf, filetype="pdf")
-            changed = False
-            for page in doc:
-                rect = page.rect
-                if rect.height > rect.width:
-                    # Rotate counter-clockwise to keep text upright in landscape.
-                    page.set_rotation((page.rotation + 270) % 360)
-                    changed = True
-            if changed:
-                pdf = doc.tobytes()
-            doc.close()
-        except Exception:
-            logging.exception("Не удалось нормализовать ориентацию этикетки Ozon")
+        pdf = _normalize_ozon_label_orientation(pdf)
 
         safe = re.sub(r"[^\w\-.]+", "_", posting, flags=re.UNICODE)[:120]
         dl = f"ozon_posting_label_{safe}.pdf"
@@ -264,6 +300,306 @@ def create_app():
             as_attachment=True,
             download_name=dl,
         )
+
+    @app.get("/shipments/<int:shipment_id>/orders-tape.pdf")
+    def shipment_orders_tape_pdf(shipment_id: int):
+        data = service.get_shipment_detail(shipment_id)
+        shipment = data.get("shipment") or {}
+        orders = data.get("orders") or []
+        if not shipment or not orders:
+            flash("Поставка не найдена или в ней нет заказов.", "error")
+            return redirect(url_for("orders"))
+
+        out_doc = fitz.open()
+        try:
+            prepared: List[dict] = []
+            issues: List[str] = []
+
+            # Preflight: verify that BOTH labels are available for EACH order.
+            for order in orders:
+                order_id = int(order.get("id") or 0)
+                posting = str(order.get("posting_number") or "")
+                if not order_id or not posting:
+                    issues.append(f"Некорректный заказ в поставке (id={order.get('id')}).")
+                    continue
+
+                rel = service.ensure_order_label_pdf_file(order_id)
+                if not rel:
+                    issues.append(f"{posting}: нет локальной этикетки (ШК).")
+                    continue
+                local_path = os.path.join(Config.BASE_DIR, rel.replace("/", os.sep))
+                if not os.path.isfile(local_path):
+                    issues.append(f"{posting}: файл локальной этикетки не найден.")
+                    continue
+
+                try:
+                    ozon_pdf = service.client.get_fbs_package_label_pdf(posting)
+                    ozon_pdf = _normalize_ozon_label_orientation(ozon_pdf)
+                except Exception:
+                    issues.append(f"{posting}: не удалось получить этикетку Ozon.")
+                    continue
+
+                prepared.append(
+                    {
+                        "posting": posting,
+                        "local_path": local_path,
+                        "ozon_pdf": ozon_pdf,
+                    }
+                )
+
+            if issues:
+                preview = "; ".join(issues[:5])
+                tail = f" (и еще {len(issues) - 5})" if len(issues) > 5 else ""
+                flash(
+                    "Лента заказов не сформирована: не все этикетки доступны. "
+                    f"Проблемы: {preview}{tail}",
+                    "error",
+                )
+                return redirect(url_for("shipment_detail", shipment_id=shipment_id))
+
+            # Build final tape only after all labels are pre-validated.
+            for entry in prepared:
+                local_doc = fitz.open(entry["local_path"])
+                out_doc.insert_pdf(local_doc)
+                local_doc.close()
+
+                ozon_doc = fitz.open(stream=entry["ozon_pdf"], filetype="pdf")
+                out_doc.insert_pdf(ozon_doc)
+                ozon_doc.close()
+
+            if out_doc.page_count == 0:
+                flash("Не удалось собрать ленту заказов: нет подходящих этикеток.", "error")
+                return redirect(url_for("shipment_detail", shipment_id=shipment_id))
+
+            from io import BytesIO
+
+            pdf_bytes = out_doc.tobytes()
+            safe_name = re.sub(r"[^\w\-.]+", "_", str(shipment.get("name") or shipment_id), flags=re.UNICODE)[:120]
+            filename = f"lenta_zakazov_{safe_name}.pdf"
+            return send_file(
+                BytesIO(pdf_bytes),
+                mimetype="application/pdf",
+                as_attachment=True,
+                download_name=filename,
+            )
+        except OzonApiError as exc:
+            logging.exception("Ошибка Ozon API при сборке ленты заказов")
+            flash(str(exc), "error")
+            return redirect(url_for("shipment_detail", shipment_id=shipment_id))
+        except Exception as exc:
+            logging.exception("Ошибка при сборке ленты заказов")
+            flash(str(exc) or "Не удалось сформировать ленту заказов.", "error")
+            return redirect(url_for("shipment_detail", shipment_id=shipment_id))
+        finally:
+            out_doc.close()
+
+    @app.get("/shipments/<int:shipment_id>/picklist.xlsx")
+    def shipment_picklist_xlsx(shipment_id: int):
+        data = service.get_shipment_detail(shipment_id)
+        shipment = data.get("shipment") or {}
+        orders = data.get("orders") or []
+        if not shipment or not orders:
+            flash("Поставка не найдена или в ней нет заказов.", "error")
+            return redirect(url_for("orders"))
+
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+            from io import BytesIO
+
+            agg: dict[str, int] = {}
+            for order in orders:
+                for item in (order.get("items") or []):
+                    offer_id = str(item.get("offer_id") or item.get("sku") or "").strip()
+                    norm = _normalize_pick_article(offer_id)
+                    qty = int(item.get("quantity") or 0)
+                    if qty <= 0:
+                        qty = 1
+                    agg[norm] = agg.get(norm, 0) + qty
+
+            wb = Workbook()
+            ws_print = wb.active
+            ws_print.title = "Печать"
+            ws_print.append(["Артикул", "Количество"])
+            total_qty = 0
+            for article, qty in sorted(agg.items(), key=lambda x: x[0]):
+                ws_print.append([article, qty])
+                total_qty += int(qty or 0)
+            ws_print.append(["Итого", total_qty])
+
+            ws_print.column_dimensions["A"].width = 28
+            ws_print.column_dimensions["B"].width = 14
+
+            thin = Side(style="thin", color="000000")
+            all_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            base_font = Font(name="Calibri", size=18)
+            bold_font = Font(name="Calibri", size=18, bold=True)
+
+            max_row = ws_print.max_row
+            for row in ws_print.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=2):
+                for c in row:
+                    c.font = base_font
+                    c.border = all_border
+                    c.alignment = Alignment(vertical="center")
+
+            for c in ws_print[1]:
+                c.font = bold_font
+                c.alignment = Alignment(horizontal="center", vertical="center")
+
+            for r in range(2, max_row + 1):
+                ws_print.cell(row=r, column=1).alignment = Alignment(horizontal="left", vertical="center")
+                ws_print.cell(row=r, column=2).alignment = Alignment(horizontal="center", vertical="center")
+
+            ws_print.cell(row=max_row, column=1).font = bold_font
+            ws_print.cell(row=max_row, column=2).font = bold_font
+
+            # Sheet 2: "Сборка" (pivot-like by brand-prefix -> color-letter -> size)
+            ws_pick = wb.create_sheet("Сборка")
+            shipment_title = f"Поставка: {shipment.get('name') or shipment_id}"
+            ws_pick.append([shipment_title, ""])
+            ws_pick.append(["Названия строк", "Количество"])
+            ws_pick.column_dimensions["A"].width = 34
+            ws_pick.column_dimensions["B"].width = 16
+
+            def _parse_pick_keys(offer_id: str, size_raw: str) -> tuple[str, str, str]:
+                s = str(offer_id or "").strip()
+                prefix = (s.split("_", 1)[0] if "_" in s else s) or "—"
+                parts = s.split("_")
+                color = "X"
+                size = str(size_raw or "").strip()
+
+                def _latinize_color(c: str) -> str:
+                    t = str(c or "").upper()[:1]
+                    return (
+                        t.replace("А", "A")
+                        .replace("В", "B")
+                        .replace("Е", "E")
+                        .replace("К", "K")
+                        .replace("М", "M")
+                        .replace("Н", "H")
+                        .replace("О", "O")
+                        .replace("Р", "P")
+                        .replace("С", "C")
+                        .replace("Т", "T")
+                        .replace("У", "Y")
+                        .replace("Х", "X")
+                    )
+
+                # Expected forms:
+                # BASE_6_2_104_B_S
+                # L_3_1_44_BS
+                # L_3_1_7_WM
+                # L_3_1_58_ВM
+                # BASE_3_1_697_BB_M
+                if len(parts) >= 5:
+                    tail = parts[4] or ""
+                    color = _latinize_color(tail[:1] if tail else "X")
+                    if len(parts) >= 6 and parts[5]:
+                        size = parts[5]
+                    elif len(tail) > 1:
+                        size = tail[1:]
+
+                if not size:
+                    size = parts[-1] if parts else "—"
+                return prefix, color, size.upper()
+
+            tree: dict[str, dict[str, dict[str, int]]] = {}
+            for order in orders:
+                for item in (order.get("items") or []):
+                    offer_id = str(item.get("offer_id") or item.get("sku") or "").strip()
+                    qty = int(item.get("quantity") or 0)
+                    if qty <= 0:
+                        qty = 1
+                    prefix, color, size = _parse_pick_keys(offer_id, str(item.get("manufacturer_size") or ""))
+                    tree.setdefault(prefix, {}).setdefault(color, {})
+                    tree[prefix][color][size] = tree[prefix][color].get(size, 0) + qty
+
+            ws_pick["A1"].font = bold_font
+            ws_pick["A1"].alignment = Alignment(horizontal="left", vertical="center")
+            ws_pick.merge_cells("A1:B1")
+            ws_pick["A2"].font = bold_font
+            ws_pick["B2"].font = bold_font
+            ws_pick["A2"].alignment = Alignment(horizontal="left", vertical="center")
+            ws_pick["B2"].alignment = Alignment(horizontal="center", vertical="center")
+            fill_header = PatternFill(fill_type="solid", fgColor="D9E1F2")
+            fill_level_1 = PatternFill(fill_type="solid", fgColor="E2F0D9")
+            fill_level_2 = PatternFill(fill_type="solid", fgColor="FCE4D6")
+            for c in ws_pick[2]:
+                c.fill = fill_header
+
+            def _size_sort_key(sz: str) -> tuple[int, str]:
+                order_map = {
+                    "XS": 1,
+                    "S": 2,
+                    "M": 3,
+                    "L": 4,
+                    "XL": 5,
+                    "XXL": 6,
+                    "XXXL": 7,
+                    "4XL": 8,
+                    "5XL": 9,
+                    "6XL": 10,
+                }
+                return (order_map.get(sz.upper(), 100), sz)
+
+            grand_total = 0
+            for prefix in sorted(tree.keys()):
+                prefix_total = sum(
+                    qty
+                    for c in tree[prefix].values()
+                    for qty in c.values()
+                )
+                grand_total += prefix_total
+                ws_pick.append([prefix, prefix_total])
+                pr = ws_pick.max_row
+                ws_pick[f"A{pr}"].font = bold_font
+                ws_pick[f"B{pr}"].font = bold_font
+                ws_pick[f"A{pr}"].fill = fill_level_1
+                ws_pick[f"B{pr}"].fill = fill_level_1
+
+                for color in sorted(tree[prefix].keys()):
+                    color_total = sum(tree[prefix][color].values())
+                    ws_pick.append([f"  Цвет-{color}", color_total])
+                    cr = ws_pick.max_row
+                    ws_pick[f"A{cr}"].font = bold_font
+                    ws_pick[f"B{cr}"].font = bold_font
+                    ws_pick[f"A{cr}"].fill = fill_level_2
+                    ws_pick[f"B{cr}"].fill = fill_level_2
+
+                    for size in sorted(tree[prefix][color].keys(), key=_size_sort_key):
+                        ws_pick.append([f"    {size}", tree[prefix][color][size]])
+
+            ws_pick.append(["Итого", grand_total])
+            tr = ws_pick.max_row
+            ws_pick[f"A{tr}"].font = bold_font
+            ws_pick[f"B{tr}"].font = bold_font
+            ws_pick[f"A{tr}"].fill = fill_header
+            ws_pick[f"B{tr}"].fill = fill_header
+
+            for row in ws_pick.iter_rows(min_row=2, max_row=ws_pick.max_row, min_col=1, max_col=2):
+                for c in row:
+                    if c.font != bold_font:
+                        c.font = base_font
+                    c.border = all_border
+                    c.alignment = Alignment(vertical="center")
+            for r in range(2, ws_pick.max_row + 1):
+                ws_pick.cell(row=r, column=2).alignment = Alignment(horizontal="right", vertical="center")
+
+            bio = BytesIO()
+            wb.save(bio)
+            bio.seek(0)
+            safe_name = re.sub(r"[^\w\-.]+", "_", str(shipment.get("name") or shipment_id), flags=re.UNICODE)[:120]
+            filename = f"fayl_podbora_{safe_name}.xlsx"
+            return send_file(
+                bio,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                as_attachment=True,
+                download_name=filename,
+            )
+        except Exception:
+            logging.exception("Не удалось сформировать файл подбора")
+            flash("Не удалось сформировать файл подбора.", "error")
+            return redirect(url_for("shipment_detail", shipment_id=shipment_id))
 
     @app.get("/orders/shipment/next-name")
     def orders_shipment_next_name():

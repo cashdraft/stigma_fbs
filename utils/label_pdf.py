@@ -67,6 +67,7 @@ _BC_RENDER_OPTS: dict[str, Any] = {
     "background": "white",
     "foreground": "black",
 }
+_BARCODE_IMAGE_DPI = 300
 
 
 def _template_path() -> str:
@@ -156,7 +157,8 @@ def _bc_png(barcode_raw: str) -> Tuple[Optional[io.BytesIO], str]:
 
     digits = re.sub(r"\D", "", barcode_raw or "")
     display = (barcode_raw or "").strip() or digits
-    writer = ImageWriter(format="PNG", mode="RGB", dpi=300)
+    # 203 DPI is standard for thermal barcode printing and keeps files much lighter than 300 DPI.
+    writer = ImageWriter(format="PNG", mode="RGB", dpi=_BARCODE_IMAGE_DPI)
     payload = digits if digits else (barcode_raw or "").strip()
     if not payload:
         return None, display
@@ -384,7 +386,15 @@ def write_order_label_pdf(order_id: int, items: List[Dict[str, Any]]) -> str:
                     keep_proportion=True,
                 )
 
-        out.save(out_path)
+        out.save(
+            out_path,
+            garbage=4,
+            deflate=True,
+            deflate_images=True,
+            deflate_fonts=True,
+            use_objstms=1,
+            pretty=False,
+        )
     finally:
         out.close()
         src.close()
