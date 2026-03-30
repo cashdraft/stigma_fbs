@@ -403,7 +403,11 @@ document.addEventListener("DOMContentLoaded", () => {
       });
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error((data && data.message) || `Ошибка ${res.status}`);
-      setShipmentProgress(2, "done", data.message || "Готово");
+      let doneText = data.message || "Готово";
+      if (Number(data.failed_count || 0) > 0) {
+        doneText += ` Завершилось с ошибкой: ${Number(data.failed_count)}.`;
+      }
+      setShipmentProgress(2, "done", doneText);
       setShipmentProgress(3, "done", "Готово");
       if (shipmentProgressClose) shipmentProgressClose.disabled = false;
       setTimeout(() => {

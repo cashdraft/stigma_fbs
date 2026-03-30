@@ -648,9 +648,23 @@ def create_app():
                     if is_ajax:
                         return jsonify({"ok": False, "message": msg, "next_url": next_url}), 500
                     flash(msg, "error")
-                success_msg = f"Поставка «{result['name']}» создана и отгружена, заказов: {result['count']}."
+                failed = result.get("failed_postings") or []
+                success_msg = (
+                    f"Поставка «{result['name']}»: отгружено {result.get('count', 0)} "
+                    f"из {result.get('requested_count', result.get('count', 0))}."
+                )
+                if failed:
+                    success_msg += f" Пропущено из-за ошибок Ozon: {len(failed)}."
                 if is_ajax:
-                    return jsonify({"ok": True, "message": success_msg, "next_url": next_url})
+                    return jsonify(
+                        {
+                            "ok": True,
+                            "message": success_msg,
+                            "next_url": next_url,
+                            "failed_count": len(failed),
+                            "failed_postings": failed[:10],
+                        }
+                    )
                 flash(success_msg, "success")
             else:
                 err = result.get("error") or "Не удалось создать поставку"
@@ -710,9 +724,23 @@ def create_app():
                     if is_ajax:
                         return jsonify({"ok": False, "message": msg, "next_url": next_url}), 500
                     flash(msg, "error")
-                success_msg = f"Добавлено в поставку «{result.get('shipment_name') or shipment_id}», заказов: {result['count']}."
+                failed = result.get("failed_postings") or []
+                success_msg = (
+                    f"Добавлено в поставку «{result.get('shipment_name') or shipment_id}»: "
+                    f"{result.get('count', 0)} из {result.get('requested_count', result.get('count', 0))}."
+                )
+                if failed:
+                    success_msg += f" Пропущено из-за ошибок Ozon: {len(failed)}."
                 if is_ajax:
-                    return jsonify({"ok": True, "message": success_msg, "next_url": next_url})
+                    return jsonify(
+                        {
+                            "ok": True,
+                            "message": success_msg,
+                            "next_url": next_url,
+                            "failed_count": len(failed),
+                            "failed_postings": failed[:10],
+                        }
+                    )
                 flash(success_msg, "success")
             else:
                 err = result.get("error") or "Не удалось добавить в поставку"

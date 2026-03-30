@@ -5,7 +5,7 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from api_clients.ozon_client import OzonClient
+from api_clients.ozon_client import OzonApiError, OzonClient
 from config import Config
 from database.db import get_db_connection
 from utils.ozon_product_meta import (
@@ -916,6 +916,8 @@ class OrdersService:
                 }
 
             n_ozon = 0
+            shipped_ids: List[int] = []
+            failed_postings: List[str] = []
             for orow in eligible_rows:
                 oid = int(orow["id"])
                 posting_number = str(orow["posting_number"] or "")
@@ -933,33 +935,59 @@ class OrdersService:
                 if not products:
                     continue
 
-                for unit_product in products:
-                    self.client.ship_fbs_posting(
-                        posting_number=posting_number,
-                        products=[unit_product],
+                try:
+                    for unit_product in products:
+                        self.client.ship_fbs_posting(
+                            posting_number=posting_number,
+                            products=[unit_product],
+                        )
+                        n_ozon += 1
+                    shipped_ids.append(oid)
+                except OzonApiError:
+                    # Skip only this posting; continue processing other selected orders.
+                    self.logger.exception(
+                        "Ozon ship failed for posting=%s while adding to shipment=%s",
+                        posting_number,
+                        shipment_id,
                     )
-                    n_ozon += 1
+                    failed_postings.append(posting_number)
+                    continue
 
             now = datetime.utcnow().isoformat()
-            st_placeholders = ",".join("?" * len(eligible_ids))
-            conn.execute(
-                f"""
-                UPDATE orders
-                SET shipment_id = ?,
-                    status = ?,
-                    updated_at = ?
-                WHERE id IN ({st_placeholders})
-                """,
-                [shipment_id, "awaiting_deliver", now, *eligible_ids],
-            )
+            if shipped_ids:
+                st_placeholders = ",".join("?" * len(shipped_ids))
+                conn.execute(
+                    f"""
+                    UPDATE orders
+                    SET shipment_id = ?,
+                        status = ?,
+                        updated_at = ?
+                    WHERE id IN ({st_placeholders})
+                    """,
+                    [shipment_id, "awaiting_deliver", now, *shipped_ids],
+                )
             conn.commit()
+            if not shipped_ids:
+                return {
+                    "ok": False,
+                    "error": "Ozon не принял ни один из выбранных заказов",
+                    "shipment_id": shipment_id,
+                    "shipment_name": srow["name"],
+                    "count": 0,
+                    "requested_count": len(eligible_ids),
+                    "ozon_ship_requests": n_ozon,
+                    "source_postings": source_postings,
+                    "failed_postings": failed_postings,
+                }
             return {
-                "ok": True,
+                "ok": bool(shipped_ids),
                 "shipment_id": shipment_id,
                 "shipment_name": srow["name"],
-                "count": len(eligible_ids),
+                "count": len(shipped_ids),
+                "requested_count": len(eligible_ids),
                 "ozon_ship_requests": n_ozon,
                 "source_postings": source_postings,
+                "failed_postings": failed_postings,
             }
         except Exception:
             conn.rollback()
@@ -1031,6 +1059,8 @@ class OrdersService:
             )
 
             n_shipped = 0
+            shipped_ok_ids: List[int] = []
+            failed_postings: List[str] = []
             if ship_after and eligible_for_status:
                 # 1) Ship on Ozon for each eligible posting.
                 eligible_ph = ",".join("?" * len(eligible_for_status))
@@ -1066,23 +1096,46 @@ class OrdersService:
 
                     # Split into unit-level shipments (like "Разделить заказ"),
                     # by shipping one unit at a time.
-                    for unit_product in products:
-                        self.client.ship_fbs_posting(
-                            posting_number=posting_number,
-                            products=[unit_product],
+                    try:
+                        for unit_product in products:
+                            self.client.ship_fbs_posting(
+                                posting_number=posting_number,
+                                products=[unit_product],
+                            )
+                            n_shipped += 1
+                        shipped_ok_ids.append(oid)
+                    except OzonApiError:
+                        self.logger.exception(
+                            "Ozon ship failed for posting=%s while creating shipment=%s",
+                            posting_number,
+                            shipment_id,
                         )
-                        n_shipped += 1
+                        failed_postings.append(posting_number)
+                        continue
 
                 # 2) After Ozon ship success, move local statuses.
-                st_placeholders = ",".join("?" * len(eligible_for_status))
-                conn.execute(
-                    f"""
-                    UPDATE orders
-                    SET status = ?
-                    WHERE id IN ({st_placeholders})
-                    """,
-                    ["awaiting_deliver", *eligible_for_status],
-                )
+                if shipped_ok_ids:
+                    st_placeholders = ",".join("?" * len(shipped_ok_ids))
+                    conn.execute(
+                        f"""
+                        UPDATE orders
+                        SET status = ?
+                        WHERE id IN ({st_placeholders})
+                        """,
+                        ["awaiting_deliver", *shipped_ok_ids],
+                    )
+                # Remove shipment link for failed ones so they can be retried cleanly.
+                failed_ids = [oid for oid in eligible_for_status if oid not in set(shipped_ok_ids)]
+                if failed_ids:
+                    failed_ph = ",".join("?" * len(failed_ids))
+                    conn.execute(
+                        f"""
+                        UPDATE orders
+                        SET shipment_id = NULL
+                        WHERE id IN ({failed_ph})
+                        """,
+                        [*failed_ids],
+                    )
             elif eligible_for_status:
                 # Without Ozon call (debug / old mode): just move status locally.
                 st_placeholders = ",".join("?" * len(eligible_for_status))
@@ -1096,14 +1149,29 @@ class OrdersService:
                 )
 
             conn.commit()
+            if ship_after and not shipped_ok_ids and eligible_for_status:
+                return {
+                    "ok": False,
+                    "error": "Ozon не принял ни один из выбранных заказов",
+                    "shipment_id": shipment_id,
+                    "name": clean,
+                    "count": 0,
+                    "requested_count": len(ids),
+                    "status_moved_to_awaiting_deliver": 0,
+                    "ozon_ship_requests": n_shipped,
+                    "source_postings": source_postings if ship_after else [],
+                    "failed_postings": failed_postings if ship_after else [],
+                }
             return {
-                "ok": True,
+                "ok": bool(shipped_ok_ids or (not ship_after and ids)),
                 "shipment_id": shipment_id,
                 "name": clean,
-                "count": len(ids),
-                "status_moved_to_awaiting_deliver": len(eligible_for_status),
+                "count": len(shipped_ok_ids) if ship_after else len(ids),
+                "requested_count": len(ids),
+                "status_moved_to_awaiting_deliver": len(shipped_ok_ids) if ship_after else len(eligible_for_status),
                 "ozon_ship_requests": n_shipped if ship_after else 0,
                 "source_postings": source_postings if ship_after and eligible_for_status else [],
+                "failed_postings": failed_postings if ship_after else [],
             }
         except sqlite3.IntegrityError:
             conn.rollback()
