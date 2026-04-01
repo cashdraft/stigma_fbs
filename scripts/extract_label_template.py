@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Вырезать одну страницу 580×400 из PDF-ленты Ozon → instance/wb_label_template.pdf (быстрый шаблон для ШК)."""
+"""Вырезать страницу из PDF-ленты → instance/wb_label_template.pdf (опционально для WB).
+
+Не копировать результат на место print_2026_03_25_21_41.pdf: первая страница ленты — уже
+сгенерированная этикетка, координаты в utils/label_pdf.py рассчитаны под оригинальный шаблон Ozon.
+"""
 from __future__ import annotations
 
 import argparse
