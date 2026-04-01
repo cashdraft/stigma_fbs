@@ -1,1 +1,1 @@
-from .ozon_client import OzonClient
+# Импорты: `from api_clients.wb_client import WbClient` и т.д.

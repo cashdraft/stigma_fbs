@@ -4,6 +4,7 @@
   <div
     class="orders-page"
     data-orders-page
+    data-load-more-url="{{ url_for('orders_load_more') }}"
     data-filter-status="{{ filters.status }}"
     data-filter-date-from="{{ filters.date_from }}"
     data-filter-date-to="{{ filters.date_to }}"
@@ -21,7 +22,6 @@
       <button type="submit" class="btn" id="update-orders-btn">Обновить заказы</button>
       <button type="submit" class="btn btn-secondary" id="update-all-orders-btn">Обновить все заказы</button>
     </form>
-    <span class="muted" id="update-orders-status" aria-live="polite"></span>
   </section>
 
   {% if top_shipments %}
@@ -229,4 +229,5 @@
       </div>
     </div>
   </div>
+
 {% endblock %}

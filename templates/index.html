@@ -1,31 +1,61 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <section class="actions-row">
-    <form method="post" action="{{ url_for('update_orders') }}">
-      <input type="hidden" name="status" value="all" />
-      <input type="hidden" name="limit" value="100" />
-      <button type="submit" class="btn">Обновить заказы</button>
-    </form>
-    <a class="btn btn-secondary" href="{{ url_for('orders') }}">Перейти к заказам</a>
-  </section>
+  <section class="cards cards--home" aria-label="Сводка и действия Ozon">
+    <a
+      class="card card--link card--ozon-home"
+      href="{{ url_for('orders', status='all') }}"
+      aria-label="Заказы Ozon, все статусы"
+    >
+      <img
+        class="card--ozon-home-logo"
+        src="{{ url_for('icon_ozon_png') }}"
+        alt=""
+        width="88"
+        height="88"
+        loading="eager"
+        decoding="sync"
+      />
+    </a>
 
-  <section class="cards">
-    <div class="card">
-      <span>Всего заказов</span>
-      <strong>{{ summary.total }}</strong>
-    </div>
-    <div class="card">
-      <span>Ожидают упаковки</span>
-      <strong>{{ summary.by_status.get('awaiting_packaging', 0) }}</strong>
-    </div>
-    <div class="card">
-      <span>Ожидают отгрузки</span>
-      <strong>{{ summary.by_status.get('awaiting_deliver', 0) }}</strong>
-    </div>
-    <div class="card">
-      <span>Доставляются</span>
-      <strong>{{ summary.by_status.get('delivering', 0) }}</strong>
-    </div>
+    <form
+      method="post"
+      action="{{ url_for('update_orders') }}"
+      class="card card--sync-ozon-home"
+      id="home-sync-ozon-form"
+    >
+      <input type="hidden" name="status" value="all" />
+      <input type="hidden" name="since" value="" />
+      <input type="hidden" name="to" value="" />
+      <input type="hidden" name="limit" value="100" />
+      <input type="hidden" name="sync_scope" value="all" />
+      <button type="submit" class="card--sync-ozon-home-btn" id="home-sync-ozon-btn">
+        <span class="card--sync-ozon-home-title">Синхронизация с Ozon</span>
+        <span class="card--sync-ozon-home-sub">Обновить все заказы (3 статуса)</span>
+      </button>
+    </form>
+
+    <a
+      class="card card--link card--stat card--stat-awaiting_packaging"
+      href="{{ url_for('orders', status='awaiting_packaging') }}"
+    >
+      <span class="card--stat-label">Ожидают сборки</span>
+      <strong class="card--stat-value">{{ summary.by_status.get('awaiting_packaging', 0) }}</strong>
+    </a>
+    <a
+      class="card card--link card--stat card--stat-awaiting_deliver"
+      href="{{ url_for('orders', status='awaiting_deliver') }}"
+    >
+      <span class="card--stat-label">Ожидают отгрузки</span>
+      <strong class="card--stat-value">{{ summary.by_status.get('awaiting_deliver', 0) }}</strong>
+    </a>
+    <a class="card card--link card--stat card--stat-delivering" href="{{ url_for('orders', status='delivering') }}">
+      <span class="card--stat-label">Доставляются</span>
+      <strong class="card--stat-value">{{ summary.by_status.get('delivering', 0) }}</strong>
+    </a>
+    <a class="card card--link card--stat card--stat-all" href="{{ url_for('orders', status='all') }}">
+      <span class="card--stat-label">Все</span>
+      <strong class="card--stat-value">{{ summary.total }}</strong>
+    </a>
   </section>
 {% endblock %}

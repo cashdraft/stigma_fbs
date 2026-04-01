@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Stigma FBS</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v=static_v) }}" />
   </head>
   <body>
     <header class="container topbar">
@@ -36,6 +36,40 @@
       {% block content %}{% endblock %}
     </main>
 
-    <script src="{{ url_for('static', filename='app.js') }}"></script>
+    <div
+      id="update-ozon-progress-modal"
+      class="modal-overlay modal-overlay--hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="update-ozon-progress-title"
+      aria-hidden="true"
+    >
+      <div class="modal-dialog modal-dialog--shipment">
+        <h2 id="update-ozon-progress-title" class="modal-title-shipment">Обновление заказов Ozon</h2>
+        <p class="modal-subtitle-shipment" id="update-ozon-progress-stage" aria-live="polite">Подготовка...</p>
+        <div class="modal-actions modal-actions-shipment modal-actions-progress">
+          <button type="button" class="btn btn-shipment-close" id="update-ozon-progress-close">Отменить</button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      id="update-wb-progress-modal"
+      class="modal-overlay modal-overlay--hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="update-wb-progress-title"
+      aria-hidden="true"
+    >
+      <div class="modal-dialog modal-dialog--shipment">
+        <h2 id="update-wb-progress-title" class="modal-title-shipment">Обновление заказов Wildberries</h2>
+        <p class="modal-subtitle-shipment" id="update-wb-progress-stage" aria-live="polite">Подготовка...</p>
+        <div class="modal-actions modal-actions-shipment modal-actions-progress">
+          <button type="button" class="btn btn-shipment-close" id="update-wb-progress-close">Отменить</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js', v=static_v) }}"></script>
   </body>
   </html>

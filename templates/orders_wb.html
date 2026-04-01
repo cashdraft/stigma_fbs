@@ -1,9 +1,132 @@
 {% extends "base.html" %}
 
 {% block content %}
+  <div
+    class="orders-page"
+    data-orders-page
+    data-load-more-url="{{ url_for('orders_wb_load_more') }}"
+    data-filter-status="{{ filters.status }}"
+    data-filter-date-from="{{ filters.date_from }}"
+    data-filter-date-to="{{ filters.date_to }}"
+    data-filter-q="{{ filters.q }}"
+    data-next-page="{{ next_page or 0 }}"
+    data-has-more="{{ 'true' if has_more else 'false' }}"
+  >
   <section class="actions-row">
-    <h2 style="margin: 0;">Заказы WB</h2>
+    <form method="post" action="{{ url_for('update_orders_wb') }}" class="inline-form" id="update-wb-form">
+      <input type="hidden" name="since" value="{{ filters.date_from }}" />
+      <input type="hidden" name="to" value="{{ filters.date_to }}" />
+      <button type="submit" class="btn" id="update-wb-btn">Синхронизировать с Wildberries</button>
+    </form>
   </section>
 
-  <p class="muted orders-found">Раздел WB пока в разработке.</p>
+  <div class="status-toolbar">
+    <div class="status-tabs" aria-label="Фильтр по статусу WB">
+      {% for tab in data.status_tabs %}
+        <a
+          class="status-tab{% if filters.status == tab.value %} status-tab--active{% endif %}"
+          href="{{ url_for('orders_wb', status=tab.value, date_from=filters.date_from, date_to=filters.date_to, q=filters.q) }}"
+        >
+          <span>{{ tab.label }}</span>
+          <span class="status-tab-count">{{ tab.count }}</span>
+        </a>
+      {% endfor %}
+    </div>
+
+    <div class="period-control" id="period-control">
+      <button
+        type="button"
+        class="period-btn{% if filters.date_from or filters.date_to %} period-btn--selected{% endif %}"
+        id="period-btn"
+      >
+        <span class="period-btn-title">Период</span>
+        <span class="period-btn-dates{% if not filters.date_from and not filters.date_to %} period-btn-dates--hidden{% endif %}" id="period-btn-dates">
+          : {{ filters.date_from or '...' }} – {{ filters.date_to or '...' }}
+        </span>
+        <span class="period-btn-sep{% if not filters.date_from and not filters.date_to %} period-btn-sep--hidden{% endif %}" id="period-btn-sep">·</span>
+        <span class="period-btn-reset{% if not filters.date_from and not filters.date_to %} period-btn-reset--hidden{% endif %}" id="period-btn-reset">Сбросить</span>
+      </button>
+      <div class="period-popover period-popover--hidden" id="period-popover">
+        <label>
+          С даты
+          <input type="date" id="period-from" value="{{ filters.date_from }}" />
+        </label>
+        <label>
+          По дату
+          <input type="date" id="period-to" value="{{ filters.date_to }}" />
+        </label>
+        <div class="period-actions">
+          <button type="button" class="btn btn-secondary" id="period-cancel">Закрыть</button>
+          <button type="button" class="btn" id="period-apply">Применить</button>
+        </div>
+      </div>
+    </div>
+
+    <form method="get" action="{{ url_for('orders_wb') }}" id="orders-search-form" class="status-search-form">
+      <input type="hidden" name="status" value="{{ filters.status }}" />
+      <input type="hidden" name="date_from" id="search-date-from" value="{{ filters.date_from }}" />
+      <input type="hidden" name="date_to" id="search-date-to" value="{{ filters.date_to }}" />
+      <span class="status-search-icon" aria-hidden="true">🔍</span>
+      <input
+        type="search"
+        name="q"
+        id="orders-search-input"
+        class="status-search-input"
+        value="{{ filters.q }}"
+        placeholder="Поиск id / orderUid / артикул / штрихкод"
+        enterkeyhint="search"
+        autocomplete="off"
+      />
+    </form>
+  </div>
+
+  <form method="get" action="{{ url_for('orders_wb') }}" class="filters filters--hidden" id="orders-filters">
+    <input type="hidden" name="status" value="{{ filters.status }}" />
+    <input type="hidden" name="q" value="{{ filters.q }}" />
+    <input type="hidden" name="date_from" value="{{ filters.date_from }}" autocomplete="off" />
+    <input type="hidden" name="date_to" value="{{ filters.date_to }}" autocomplete="off" />
+    <noscript>
+      <button type="submit" class="btn">Применить</button>
+    </noscript>
+  </form>
+
+  <p class="muted orders-found">Найдено заказов WB: {{ data.total }}</p>
+
+  <table class="orders-table">
+    <thead>
+      <tr>
+        <th class="col-check" aria-hidden="true"></th>
+        <th>ID</th>
+        <th>Поставка</th>
+        <th class="col-status">Статус</th>
+        <th>Создан</th>
+        <th>Тариф</th>
+        <th>Фото</th>
+        <th>Артикул</th>
+        <th>Категория</th>
+        <th>Штрихкод</th>
+        <th>Размер</th>
+        <th class="col-label-pdf" title="Этикетка PDF">ШК</th>
+        <th class="col-label-pdf" title="Этикетка Ozon">Ozon</th>
+      </tr>
+    </thead>
+    <tbody id="orders-tbody">
+      {% if data.orders %}
+        {% with orders=data.orders %}
+          {% include "partials/order_rows.html" %}
+        {% endwith %}
+      {% else %}
+        <tr>
+          <td colspan="13">Заказы не найдены — выполните синхронизацию и проверьте WB_API_TOKEN в .env</td>
+        </tr>
+      {% endif %}
+    </tbody>
+  </table>
+
+  {% if has_more %}
+    <div class="load-more-wrap" id="load-more-wrap">
+      <button type="button" class="btn-load-more" id="btn-load-more">Показать еще</button>
+    </div>
+  {% endif %}
+  </div>
 {% endblock %}

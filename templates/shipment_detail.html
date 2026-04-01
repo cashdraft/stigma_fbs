@@ -13,7 +13,11 @@
       </a>
     </div>
     <div class="shipment-actions-right">
-      <a class="btn btn-secondary btn-shipment-top" href="{{ url_for('shipment_orders_tape_pdf', shipment_id=shipment.id) }}">
+      <a
+        class="btn btn-secondary btn-shipment-top"
+        href="{{ url_for('shipment_orders_tape_pdf', shipment_id=shipment.id) }}"
+        id="shipment-tape-download-btn"
+      >
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
           <polyline points="14 2 14 8 20 8"/>
@@ -66,5 +70,23 @@
       {% endif %}
     </tbody>
   </table>
+
+  <div
+    id="tape-progress-modal"
+    class="modal-overlay modal-overlay--hidden"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="tape-progress-title"
+    aria-hidden="true"
+  >
+    <div class="modal-dialog modal-dialog--shipment">
+      <h2 id="tape-progress-title" class="modal-title-shipment">Формируем ленту заказов</h2>
+      <p class="modal-subtitle-shipment" id="tape-progress-stage">Подготовка...</p>
+      <div class="shipment-progress-list" id="tape-progress-list"></div>
+      <div class="modal-actions modal-actions-shipment modal-actions-progress">
+        <button type="button" class="btn btn-shipment-close" id="tape-progress-close" disabled>Закрыть</button>
+      </div>
+    </div>
+  </div>
 {% endblock %}
 

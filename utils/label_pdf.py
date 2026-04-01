@@ -157,7 +157,6 @@ def _bc_png(barcode_raw: str) -> Tuple[Optional[io.BytesIO], str]:
 
     digits = re.sub(r"\D", "", barcode_raw or "")
     display = (barcode_raw or "").strip() or digits
-    # 203 DPI is standard for thermal barcode printing and keeps files much lighter than 300 DPI.
     writer = ImageWriter(format="PNG", mode="RGB", dpi=_BARCODE_IMAGE_DPI)
     payload = digits if digits else (barcode_raw or "").strip()
     if not payload:
@@ -191,7 +190,13 @@ def _bc_png(barcode_raw: str) -> Tuple[Optional[io.BytesIO], str]:
             return None, display
 
 
-def write_order_label_pdf(order_id: int, items: List[Dict[str, Any]]) -> str:
+def write_order_label_pdf(
+    order_id: int,
+    items: List[Dict[str, Any]],
+    *,
+    target_page_pt: Optional[Tuple[float, float]] = None,
+    target_fit_letterbox: bool = False,
+) -> str:
     os.makedirs(Config.LABELS_DIR, exist_ok=True)
     rel = os.path.join("instance", "labels", f"order_{order_id}.pdf")
     out_path = os.path.join(Config.BASE_DIR, rel.replace("\\", "/"))
@@ -386,15 +391,48 @@ def write_order_label_pdf(order_id: int, items: List[Dict[str, Any]]) -> str:
                     keep_proportion=True,
                 )
 
-        out.save(
-            out_path,
-            garbage=4,
-            deflate=True,
-            deflate_images=True,
-            deflate_fonts=True,
-            use_objstms=1,
-            pretty=False,
-        )
+        base_w, base_h = 580.0, 400.0
+        if target_page_pt and target_page_pt[0] > 0 and target_page_pt[1] > 0:
+            target_w, target_h = float(target_page_pt[0]), float(target_page_pt[1])
+            keep_prop = bool(target_fit_letterbox)
+        else:
+            # Нет размера от Ozon (нет posting / API недоступен) — страница как в шаблоне 580×400.
+            target_w, target_h = base_w, base_h
+            keep_prop = False
+        need_resize = abs(target_w - base_w) > 0.01 or abs(target_h - base_h) > 0.01
+
+        if need_resize:
+            resized = fitz.open()
+            try:
+                for i in range(out.page_count):
+                    dst = resized.new_page(width=target_w, height=target_h)
+                    # Как в ленте заказов: при target_fit_letterbox вписываем с полями;
+                    # иначе заполняем весь прямоугольник (малый формат из .env).
+                    dst.show_pdf_page(dst.rect, out, i, keep_proportion=keep_prop)
+                resized.subset_fonts()
+                resized.save(
+                    out_path,
+                    garbage=4,
+                    deflate=True,
+                    deflate_images=True,
+                    deflate_fonts=True,
+                    use_objstms=1,
+                    pretty=False,
+                )
+            finally:
+                resized.close()
+        else:
+            # Keep print quality, but shrink PDFs by embedding only used font glyphs.
+            out.subset_fonts()
+            out.save(
+                out_path,
+                garbage=4,
+                deflate=True,
+                deflate_images=True,
+                deflate_fonts=True,
+                use_objstms=1,
+                pretty=False,
+            )
     finally:
         out.close()
         src.close()

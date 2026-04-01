@@ -37,6 +37,10 @@ def init_db():
         order_columns = {col["name"] for col in conn.execute("PRAGMA table_info(orders)").fetchall()}
         if "label_pdf_path" not in order_columns:
             conn.execute("ALTER TABLE orders ADD COLUMN label_pdf_path TEXT")
+        order_columns = {col["name"] for col in conn.execute("PRAGMA table_info(orders)").fetchall()}
+        if "wb_in_new_feed" not in order_columns:
+            # 1 = id есть в GET /api/v3/orders/new (как вкладка «Новые» в кабинете WB)
+            conn.execute("ALTER TABLE orders ADD COLUMN wb_in_new_feed INTEGER DEFAULT 0")
         columns = conn.execute("PRAGMA table_info(order_items)").fetchall()
         column_names = {col["name"] for col in columns}
         if "photo_url" not in column_names:

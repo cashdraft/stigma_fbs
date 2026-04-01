@@ -1,17 +1,40 @@
+import json
 import logging
 import os
+import queue
 import re
+import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
 
 import fitz
-from flask import Flask, flash, jsonify, redirect, render_template, request, send_file, url_for
+from flask import (
+    Flask,
+    Response,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    stream_with_context,
+    url_for,
+)
 
 from api_clients.ozon_client import OzonApiError
+from api_clients.wb_client import WbApiError
 from config import Config
+from database.catalog_db import init_catalog_db
 from database.db import init_db
 from services.orders_service import OrdersService
 from utils.helpers import parse_int
+from utils.ozon_label_cache import (
+    load_cached_ozon_label,
+    normalize_ozon_label_pdf,
+    save_cached_ozon_label,
+)
 
 
 def setup_logging():
@@ -26,9 +49,29 @@ def setup_logging():
 def create_app():
     setup_logging()
     init_db()
+    init_catalog_db()
 
     app = Flask(__name__)
     app.secret_key = Config.FLASK_SECRET_KEY
+
+    @app.context_processor
+    def inject_static_version():
+        css = os.path.join(Config.BASE_DIR, "static", "style.css")
+        js = os.path.join(Config.BASE_DIR, "static", "app.js")
+        stamps = []
+        for p in (css, js):
+            try:
+                stamps.append(int(os.path.getmtime(p)))
+            except OSError:
+                pass
+        return {"static_v": max(stamps) if stamps else int(time.time())}
+
+    @app.after_request
+    def _static_revalidate_js_css(resp):
+        path = request.path or ""
+        if path.startswith("/static/") and path.endswith((".js", ".css")):
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
     service = OrdersService()
 
@@ -58,22 +101,6 @@ def create_app():
                     time.sleep(1.2)
         if last_exc:
             raise last_exc
-
-    def _normalize_ozon_label_orientation(pdf: bytes) -> bytes:
-        try:
-            doc = fitz.open(stream=pdf, filetype="pdf")
-            changed = False
-            for page in doc:
-                rect = page.rect
-                if rect.height > rect.width:
-                    page.set_rotation((page.rotation + 270) % 360)
-                    changed = True
-            if changed:
-                pdf = doc.tobytes()
-            doc.close()
-        except Exception:
-            logging.exception("Не удалось нормализовать ориентацию этикетки Ozon")
-        return pdf
 
     def _normalize_pick_article(raw_offer_id: str) -> str:
         """
@@ -139,6 +166,7 @@ def create_app():
             query=query or None,
             page=1,
             per_page=per_page,
+            marketplace="ozon",
         )
         top_shipments = service.get_shipments_with_awaiting_deliver_orders()
         has_more = data["page"] < data["pages"]
@@ -172,6 +200,7 @@ def create_app():
             query=query or None,
             page=page,
             per_page=per_page,
+            marketplace="ozon",
         )
         html = render_template("partials/order_rows.html", orders=data["orders"])
         has_more = page < data["pages"]
@@ -180,7 +209,182 @@ def create_app():
 
     @app.get("/orders_wb")
     def orders_wb():
-        return render_template("orders_wb.html")
+        status = request.args.get("status", "all")
+        date_from = request.args.get("date_from", "")
+        date_to = request.args.get("date_to", "")
+        query = request.args.get("q", "")
+        per_page = Config.ORDERS_CHUNK_SIZE
+        data = service.get_orders(
+            status=status,
+            date_from=date_from or None,
+            date_to=date_to or None,
+            query=query or None,
+            page=1,
+            per_page=per_page,
+            marketplace="wb",
+        )
+        has_more = data["page"] < data["pages"]
+        return render_template(
+            "orders_wb.html",
+            data=data,
+            filters={
+                "status": status,
+                "date_from": date_from,
+                "date_to": date_to,
+                "q": query,
+            },
+            has_more=has_more,
+            next_page=2 if has_more else None,
+        )
+
+    @app.get("/orders_wb/load-more")
+    def orders_wb_load_more():
+        status = request.args.get("status", "all")
+        date_from = request.args.get("date_from", "")
+        date_to = request.args.get("date_to", "")
+        query = request.args.get("q", "")
+        page = parse_int(request.args.get("page"), 2, min_value=2)
+        per_page = Config.ORDERS_CHUNK_SIZE
+        data = service.get_orders(
+            status=status,
+            date_from=date_from or None,
+            date_to=date_to or None,
+            query=query or None,
+            page=page,
+            per_page=per_page,
+            marketplace="wb",
+        )
+        html = render_template("partials/order_rows.html", orders=data["orders"])
+        has_more = page < data["pages"]
+        next_page = page + 1 if has_more else None
+        return jsonify({"html": html, "has_more": has_more, "next_page": next_page})
+
+    @app.post("/orders_wb/update")
+    def update_orders_wb():
+        since = request.form.get("since", "")
+        to = request.form.get("to", "")
+        try:
+            result = service.sync_from_wb(since=since or None, to=to or None, max_records=5000)
+            flash(
+                f"Заказы WB обновлены. Создано: {result['created']}, обновлено: {result['updated']}, "
+                f"удалено устаревших: {result.get('deleted', 0)}.",
+                "success",
+            )
+        except WbApiError as exc:
+            logging.exception("Ошибка WB API")
+            flash(str(exc), "error")
+        except sqlite3.OperationalError as exc:
+            logging.exception("Ошибка SQLite при обновлении заказов WB")
+            if "locked" in str(exc).lower():
+                flash(
+                    "База данных занята (возможно, уже идёт обновление). Подождите и повторите.",
+                    "error",
+                )
+            else:
+                flash(str(exc), "error")
+        except Exception:
+            logging.exception("Неожиданная ошибка при обновлении заказов WB")
+            flash("Не удалось получить данные из API Wildberries", "error")
+        return redirect(url_for("orders_wb"))
+
+    @app.post("/orders_wb/update-json")
+    def update_orders_wb_json():
+        since = request.form.get("since", "")
+        to = request.form.get("to", "")
+        try:
+            result = service.sync_from_wb(since=since or None, to=to or None, max_records=5000)
+            return jsonify(
+                {
+                    "ok": True,
+                    "message": (
+                        f"Готово. Создано: {result.get('created', 0)}, "
+                        f"обновлено: {result.get('updated', 0)}, "
+                        f"удалено: {result.get('deleted', 0)}."
+                    ),
+                    "result": result,
+                }
+            )
+        except WbApiError as exc:
+            logging.exception("Ошибка WB API")
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        except sqlite3.OperationalError as exc:
+            logging.exception("Ошибка SQLite при обновлении заказов WB")
+            if "locked" in str(exc).lower():
+                msg = (
+                    "База данных занята (возможно, уже идёт обновление). "
+                    "Подождите и не запускайте синхронизацию дважды."
+                )
+            else:
+                msg = str(exc)
+            return jsonify({"ok": False, "message": msg}), 503
+        except Exception:
+            logging.exception("Неожиданная ошибка при обновлении заказов WB")
+            return jsonify({"ok": False, "message": "Не удалось получить данные из API Wildberries"}), 500
+
+    @app.post("/orders_wb/update-stream")
+    def update_orders_wb_stream():
+        """NDJSON-стрим: строки {type: progress|done|error, ...} для модалки прогресса."""
+        since = request.form.get("since", "")
+        to = request.form.get("to", "")
+
+        def generate():
+            q: queue.Queue = queue.Queue()
+
+            def worker():
+                try:
+                    def cb(ev):
+                        q.put(("progress", ev))
+
+                    result = service.sync_from_wb(
+                        since=since or None,
+                        to=to or None,
+                        max_records=5000,
+                        progress_cb=cb,
+                    )
+                    q.put(("done", result))
+                except WbApiError as exc:
+                    q.put(("wb_err", str(exc)))
+                except sqlite3.OperationalError as exc:
+                    if "locked" in str(exc).lower():
+                        q.put(
+                            (
+                                "err",
+                                "База данных занята (возможно, уже идёт обновление). "
+                                "Подождите и не запускайте синхронизацию дважды.",
+                            )
+                        )
+                    else:
+                        q.put(("err", str(exc)))
+                except Exception:
+                    logging.exception("Стрим: ошибка синхронизации WB")
+                    q.put(("err", "Не удалось получить данные из API Wildberries"))
+
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            while True:
+                kind, payload = q.get()
+                if kind == "progress":
+                    line = json.dumps({"type": "progress", **payload}, ensure_ascii=False) + "\n"
+                    yield line
+                elif kind == "done":
+                    yield json.dumps({"type": "done", "result": payload}, ensure_ascii=False) + "\n"
+                    break
+                elif kind == "wb_err":
+                    yield json.dumps({"type": "error", "message": payload}, ensure_ascii=False) + "\n"
+                    break
+                elif kind == "err":
+                    yield json.dumps({"type": "error", "message": payload}, ensure_ascii=False) + "\n"
+                    break
+            thread.join(timeout=2.0)
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="application/x-ndjson",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.post("/orders/update")
     def update_orders():
@@ -211,6 +415,15 @@ def create_app():
         except OzonApiError as exc:
             logging.exception("Ошибка Ozon API")
             flash(str(exc), "error")
+        except sqlite3.OperationalError as exc:
+            logging.exception("Ошибка SQLite при обновлении заказов")
+            if "locked" in str(exc).lower():
+                flash(
+                    "База данных занята (возможно, уже идёт обновление). Подождите и повторите.",
+                    "error",
+                )
+            else:
+                flash(str(exc), "error")
         except Exception:
             logging.exception("Неожиданная ошибка при обновлении заказов")
             flash("Не удалось получить данные из Ozon API", "error")
@@ -254,6 +467,16 @@ def create_app():
         except OzonApiError as exc:
             logging.exception("Ошибка Ozon API")
             return jsonify({"ok": False, "message": str(exc)}), 400
+        except sqlite3.OperationalError as exc:
+            logging.exception("Ошибка SQLite при обновлении заказов")
+            if "locked" in str(exc).lower():
+                msg = (
+                    "База данных занята (возможно, уже идёт обновление). "
+                    "Подождите и не запускайте синхронизацию дважды."
+                )
+            else:
+                msg = str(exc)
+            return jsonify({"ok": False, "message": msg}), 503
         except Exception:
             logging.exception("Неожиданная ошибка при обновлении заказов")
             return jsonify({"ok": False, "message": "Не удалось получить данные из Ozon API"}), 500
@@ -263,7 +486,9 @@ def create_app():
         rel = service.ensure_order_label_pdf_file(order_id)
         if not rel:
             flash("Нет этикетки: у позиций заказа нет штрихкода.", "error")
-            return redirect(request.referrer or url_for("orders"))
+            mp = service.get_order_marketplace(order_id)
+            fallback = url_for("orders_wb") if mp == "wb" else url_for("orders")
+            return redirect(request.referrer or fallback)
         path = os.path.join(Config.BASE_DIR, rel.replace("/", os.sep))
         posting = service.get_order_posting_number(order_id) or str(order_id)
         safe = re.sub(r"[^\w\-.]+", "_", posting, flags=re.UNICODE)[:120]
@@ -288,7 +513,8 @@ def create_app():
             flash(str(exc), "error")
             return redirect(request.referrer or url_for("orders"))
 
-        pdf = _normalize_ozon_label_orientation(pdf)
+        pdf = normalize_ozon_label_pdf(pdf)
+        save_cached_ozon_label(posting, pdf)
 
         safe = re.sub(r"[^\w\-.]+", "_", posting, flags=re.UNICODE)[:120]
         dl = f"ozon_posting_label_{safe}.pdf"
@@ -315,7 +541,8 @@ def create_app():
             prepared: List[dict] = []
             issues: List[str] = []
 
-            # Preflight: verify that BOTH labels are available for EACH order.
+            # Preflight: verify local labels and prepare Ozon label retrieval list.
+            missing_ozon: List[str] = []
             for order in orders:
                 order_id = int(order.get("id") or 0)
                 posting = str(order.get("posting_number") or "")
@@ -332,12 +559,9 @@ def create_app():
                     issues.append(f"{posting}: файл локальной этикетки не найден.")
                     continue
 
-                try:
-                    ozon_pdf = service.client.get_fbs_package_label_pdf(posting)
-                    ozon_pdf = _normalize_ozon_label_orientation(ozon_pdf)
-                except Exception:
-                    issues.append(f"{posting}: не удалось получить этикетку Ozon.")
-                    continue
+                ozon_pdf = load_cached_ozon_label(posting)
+                if not ozon_pdf:
+                    missing_ozon.append(posting)
 
                 prepared.append(
                     {
@@ -346,6 +570,35 @@ def create_app():
                         "ozon_pdf": ozon_pdf,
                     }
                 )
+
+            # Load missing Ozon labels in parallel (faster on large shipments).
+            if missing_ozon:
+                unique_missing = list(dict.fromkeys(missing_ozon))
+                worker_count = min(8, max(2, len(unique_missing)))
+
+                def fetch_one(posting_number: str) -> tuple[str, bytes]:
+                    pdf = service.client.get_fbs_package_label_pdf(posting_number)
+                    pdf = normalize_ozon_label_pdf(pdf)
+                    save_cached_ozon_label(posting_number, pdf)
+                    return posting_number, pdf
+
+                fetched: dict[str, bytes] = {}
+                with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    fut_map = {pool.submit(fetch_one, pn): pn for pn in unique_missing}
+                    for fut in as_completed(fut_map):
+                        pn = fut_map[fut]
+                        try:
+                            got_pn, pdf = fut.result()
+                            fetched[got_pn] = pdf
+                        except Exception:
+                            issues.append(f"{pn}: не удалось получить этикетку Ozon.")
+
+                for entry in prepared:
+                    if entry.get("ozon_pdf"):
+                        continue
+                    pn = str(entry.get("posting") or "")
+                    if pn in fetched:
+                        entry["ozon_pdf"] = fetched[pn]
 
             if issues:
                 preview = "; ".join(issues[:5])
@@ -359,11 +612,16 @@ def create_app():
 
             # Build final tape only after all labels are pre-validated.
             for entry in prepared:
+                ozon_doc = fitz.open(stream=entry["ozon_pdf"], filetype="pdf")
+                # Make local label page visually comparable to Ozon label size in tape PDF.
+                target_rect = ozon_doc[0].rect if ozon_doc.page_count else fitz.Rect(0, 0, 580, 400)
+
                 local_doc = fitz.open(entry["local_path"])
-                out_doc.insert_pdf(local_doc)
+                for i in range(local_doc.page_count):
+                    dst = out_doc.new_page(width=target_rect.width, height=target_rect.height)
+                    dst.show_pdf_page(dst.rect, local_doc, i, keep_proportion=True)
                 local_doc.close()
 
-                ozon_doc = fitz.open(stream=entry["ozon_pdf"], filetype="pdf")
                 out_doc.insert_pdf(ozon_doc)
                 ozon_doc.close()
 
@@ -373,7 +631,15 @@ def create_app():
 
             from io import BytesIO
 
-            pdf_bytes = out_doc.tobytes()
+            # Final compression for interleaved tape: fonts/images/object streams.
+            out_doc.subset_fonts()
+            pdf_bytes = out_doc.tobytes(
+                garbage=4,
+                deflate=True,
+                deflate_images=True,
+                deflate_fonts=True,
+                use_objstms=1,
+            )
             safe_name = re.sub(r"[^\w\-.]+", "_", str(shipment.get("name") or shipment_id), flags=re.UNICODE)[:120]
             filename = f"lenta_zakazov_{safe_name}.pdf"
             return send_file(
@@ -773,6 +1039,21 @@ def create_app():
     @app.get("/health")
     def health():
         return jsonify({"status": "ok"})
+
+    @app.cli.command("sync-wb-catalog")
+    def sync_wb_catalog_command():
+        """Полная выгрузка каталога WB в instance/wb_catalog.db (удобно для cron)."""
+        import sys
+
+        from services.wb_catalog_service import run_full_wb_catalog_sync
+
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+
+        def _pr(ev):
+            print(ev, file=sys.stderr, flush=True)
+
+        stats = run_full_wb_catalog_sync(progress_cb=_pr)
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
 
     return app
 

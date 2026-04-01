@@ -6,7 +6,7 @@
   <tr class="order-item-row{% if not loop.first %} order-item-row--cont{% endif %}" data-order-id="{{ order.id }}">
     {% if loop.first %}
     <td class="col-check" rowspan="{{ rs }}">
-      {% if order.status == 'awaiting_packaging' %}
+      {% if order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_packaging' %}
         <input
           type="checkbox"
           class="order-cb"
@@ -76,7 +76,7 @@
       {% endif %}
     </td>
     <td class="col-label-pdf" rowspan="{{ rs }}">
-      {% if order.status == 'awaiting_deliver' and order.posting_number %}
+      {% if order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_deliver' and order.posting_number %}
         <a href="{{ url_for('order_ozon_label_pdf', order_id=order.id) }}" class="label-pdf-link" title="Скачать этикетку отправления Ozon" aria-label="Скачать этикетку Ozon для заказа {{ order.posting_number or order.id }}">
           <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -94,7 +94,7 @@
   {% else %}
   <tr class="order-item-row" data-order-id="{{ order.id }}">
     <td class="col-check">
-    {% if order.status == 'awaiting_packaging' %}
+    {% if order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_packaging' %}
       <input
         type="checkbox"
         class="order-cb"
@@ -156,7 +156,7 @@
       {% endif %}
     </td>
     <td class="col-label-pdf">
-      {% if order.status == 'awaiting_deliver' and order.posting_number %}
+      {% if order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_deliver' and order.posting_number %}
         <a href="{{ url_for('order_ozon_label_pdf', order_id=order.id) }}" class="label-pdf-link" title="Скачать этикетку отправления Ozon" aria-label="Скачать этикетку Ozon для заказа {{ order.posting_number or order.id }}">
           <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
