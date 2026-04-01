@@ -12,10 +12,12 @@ from database.models import (
 
 def get_db_connection():
     os.makedirs(os.path.dirname(Config.DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(Config.DB_PATH, timeout=30)
+    timeout = int(Config.SQLITE_CONNECT_TIMEOUT_SEC)
+    busy_ms = int(Config.SQLITE_BUSY_TIMEOUT_MS)
+    conn = sqlite3.connect(Config.DB_PATH, timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA busy_timeout = 30000;")
+    conn.execute(f"PRAGMA busy_timeout = {busy_ms};")
     # WAL is much safer for concurrent read/write web access.
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA synchronous = NORMAL;")

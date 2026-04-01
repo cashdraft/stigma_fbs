@@ -157,13 +157,18 @@ class WbContentClient:
         self,
         *,
         max_pages: int = 4000,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ):
         """
         Все страницы каталога продавца (по 100 карточек), без textSearch.
         Для полной ночной выгрузки в локальную БД.
+
+        cancel_check — если возвращает True, следующий запрос к API не выполняется (кооперативная отмена).
         """
         cursor: Dict[str, Any] = {"limit": 100}
         for page_idx in range(max_pages):
+            if cancel_check and cancel_check():
+                break
             settings = {"cursor": cursor, "filter": {"withPhoto": -1}}
             data = self._request_cards_list(settings)
             cards = list(data.get("cards") or [])
@@ -191,12 +196,18 @@ class WbContentClient:
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
         paginate_min_count: Optional[int] = None,
         max_pages: int = 4000,
+        use_catalog_pagination: bool = True,
     ) -> Dict[int, Dict[str, Any]]:
         """
         Собирает карточки для набора nmId.
 
-        При большом |nm_ids| сначала листает каталог страницами по 100 (рекомендация WB),
-        затем добирает остаток через textSearch по каждому недостающему nm.
+        API WB не умеет «дай карточки по списку nmId» одним запросом.
+
+        - При use_catalog_pagination=True и |nm_ids| >= порога: листает весь каталог пачками по 100,
+          отбирая нужные nmId (выгодно, если нужен почти весь каталог).
+        - Иначе: только textSearch по одному nmId на запрос (выгодно для небольшой выборки в большом каталоге).
+
+        Остаток после скана каталога всегда добирается через textSearch по недостающим nm.
         """
         needed: Set[int] = {int(x) for x in nm_ids}
         found: Dict[int, Dict[str, Any]] = {}
@@ -213,7 +224,7 @@ class WbContentClient:
             if progress_cb:
                 progress_cb(extra)
 
-        if len(needed) >= max(1, threshold):
+        if use_catalog_pagination and len(needed) >= max(1, threshold):
             for page_num, cards, _cinfo in self.iter_catalog_pages(max_pages=max_pages):
                 for card in cards:
                     if not isinstance(card, dict):

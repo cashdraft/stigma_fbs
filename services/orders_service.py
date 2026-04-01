@@ -3,7 +3,7 @@ import logging
 import os
 import sqlite3
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 try:
     from zoneinfo import ZoneInfo
@@ -35,18 +35,23 @@ STATUS_LABELS = {
     "delivering": "Доставляется",
 }
 
+# Подписи как в кабинете WB (Маркетплейс FBS): Новые / На сборке / В доставке.
 WB_STATUS_LABELS = {
-    "new": "Новый",
-    "confirm": "В сборке",
+    "new": "Новые",
+    "confirm": "На сборке",
     "complete": "В доставке",
-    "wbgo": "Передача в доставку",
+    "wbgo": "В доставке",
     "cancel": "Отменён продавцом",
     "cancel_carrier": "Отменён перевозчиком",
 }
 
-WB_ACTIVE_SUPPLIER_STATUSES = frozenset({"new", "confirm", "complete", "wbgo"})
+# supplierStatus из /orders/status — только активная воронка; остальное не пишем и вычищаем из БД.
+WB_PORTAL_SUPPLIER_STATUSES = frozenset({"new", "confirm", "complete", "wbgo"})
 
 SHIPMENT_NAME_PREFIX = "OZON_"
+
+# Один раз в лог — если шаблон этикетки недоступен при массовой синхронизации
+_label_template_unavailable_logged = False
 def _wb_fbs_list_date_range_unix(since: Optional[str], to: Optional[str]) -> Tuple[int, int]:
     """
     Диапазон для GET /api/v3/orders: не более 30 суток по длительности, конец не в будущем.
@@ -330,15 +335,48 @@ class OrdersService:
         }
 
     @staticmethod
+    def _wb_color_from_wb_card(card: Dict[str, Any]) -> str:
+        """Текст цвета из карточки Content API (характеристика «Цвет» в кабинете WB)."""
+        for ch in card.get("characteristics") or []:
+            if not isinstance(ch, dict):
+                continue
+            name_raw = ch.get("name")
+            if not isinstance(name_raw, str):
+                continue
+            name = name_raw.strip().lower()
+            if "цвет" not in name and "color" not in name:
+                continue
+            if "упаковк" in name or "фурнитур" in name:
+                continue
+            vals = ch.get("value")
+            if isinstance(vals, list):
+                parts = [str(v).strip() for v in vals if v is not None and str(v).strip()]
+                if parts:
+                    return ", ".join(parts)[:500]
+            if vals is not None:
+                s = str(vals).strip()
+                if s:
+                    return s[:500]
+        return ""
+
+    @staticmethod
     def _wb_apply_content_card_to_item(
         item: Dict[str, Any],
         raw: Dict[str, Any],
         card: Dict[str, Any],
     ) -> None:
-        """Дополняет позицию заказа WB данными карточки Content API (title, photos, sizes[].chrtID)."""
+        """Дополняет позицию заказа WB данными карточки Content API (title, photos, sizes[].chrtID, цвет)."""
         title = (card.get("title") or card.get("imt_name") or "").strip()
         if title:
             item["name"] = title
+
+        subj = card.get("subjectName")
+        if isinstance(subj, str) and subj.strip():
+            item["category_leaf"] = subj.strip()[:500]
+
+        color_txt = OrdersService._wb_color_from_wb_card(card)
+        if color_txt:
+            item["color"] = color_txt
 
         photos = card.get("photos") or []
         if isinstance(photos, list) and photos:
@@ -380,20 +418,20 @@ class OrdersService:
                 continue
             wb_sz = sz.get("wbSize")
             tech = sz.get("techSize")
-            size_label = ""
-            if isinstance(wb_sz, str) and wb_sz.strip():
-                size_label = wb_sz.strip()
-            elif wb_sz not in (None, ""):
-                s = str(wb_sz).strip()
-                if s and s != "0":
-                    size_label = s
-            if not size_label:
-                if isinstance(tech, str) and tech.strip() and tech.strip() != "0":
-                    size_label = tech.strip()
-                elif tech not in (None, "", 0):
-                    ts = str(tech).strip()
-                    if ts and ts != "0":
-                        size_label = ts
+
+            def _wb_size_token(v: Any) -> str:
+                if isinstance(v, str) and v.strip() and v.strip() != "0":
+                    return v.strip()
+                if v not in (None, "", 0):
+                    s = str(v).strip()
+                    if s and s != "0":
+                        return s
+                return ""
+
+            # techSize — размер продавца (S, M, L, 3XL в ЛК); wbSize — сетка WB для покупателя (42-44 и т.п.)
+            tech_t = _wb_size_token(tech)
+            wb_t = _wb_size_token(wb_sz)
+            size_label = tech_t or wb_t
             if size_label:
                 item["manufacturer_size"] = size_label
             break
@@ -611,6 +649,10 @@ class OrdersService:
     ) -> Dict[str, int]:
         """
         Синхронизация сборочных заданий FBS WB: /api/v3/orders/new + /api/v3/orders + статусы.
+
+        В локальную БД попадают только заказы воронки как в кабинете: new / confirm / complete / wbgo
+        (отмены и прочие supplierStatus не сохраняются, старые такие строки удаляются).
+
         progress_cb вызывается из того же потока (для стриминга прогресса в UI).
         """
 
@@ -750,9 +792,20 @@ class OrdersService:
 
         _p({"step": "statuses_done", "chunks_total": n_chunks})
 
+        def _wb_supplier_from_status_map(oid: int) -> str:
+            if oid in status_map:
+                return status_map[oid][0]
+            return "new"
+
+        portal_order_pairs: List[Tuple[int, Dict[str, Any]]] = []
+        for oid, raw in by_id.items():
+            if _wb_supplier_from_status_map(oid) not in WB_PORTAL_SUPPLIER_STATUSES:
+                continue
+            portal_order_pairs.append((oid, raw))
+
         unique_nm: List[int] = []
         seen_nm: set[int] = set()
-        for raw_o in by_id.values():
+        for _oid, raw_o in portal_order_pairs:
             nm = raw_o.get("nmId")
             if nm is None:
                 continue
@@ -849,10 +902,10 @@ class OrdersService:
                         )
 
             posting_numbers: List[str] = []
-            items_list = list(by_id.items())
-            n_save = len(items_list)
+            wb_ids_for_labels: List[int] = []
+            n_save = len(portal_order_pairs)
             _p({"step": "database_start", "total": n_save})
-            for idx, (oid, raw) in enumerate(items_list, start=1):
+            for idx, (oid, raw) in enumerate(portal_order_pairs, start=1):
                 if oid in status_map:
                     sup, wbst = status_map[oid]
                 elif oid in prev_db_status:
@@ -878,22 +931,15 @@ class OrdersService:
                 posting_numbers.append(order["posting_number"])
                 existed, order_id = self._upsert_order(conn, order)
                 self._replace_order_items(conn, order_id, order["items"])
-                # Не генерируем PDF при массовой синхронизации WB — узкое место не SQLite, а ReportLab/штрихкод на каждый заказ.
-                # PDF собирается при первом скачивании (ensure_order_label_pdf_file).
+                wb_ids_for_labels.append(order_id)
                 if existed:
-                    row_lp = conn.execute(
-                        "SELECT label_pdf_path FROM orders WHERE id = ?",
-                        (order_id,),
-                    ).fetchone()
-                    old_lp = (row_lp["label_pdf_path"] or "").strip() if row_lp else ""
-                    if old_lp:
-                        self._unlink_label_file(old_lp)
-                    conn.execute("UPDATE orders SET label_pdf_path = NULL WHERE id = ?", (order_id,))
                     updated += 1
                 else:
                     created += 1
                 if n_save and (idx == 1 or idx % 40 == 0 or idx == n_save):
                     _p({"step": "database_save", "current": idx, "total": n_save})
+                # Commit на каждый заказ: короткие транзакции — меньше «database is locked» при PDF/параллельном UI.
+                conn.commit()
 
             if not hit_cap and posting_numbers:
                 conn.execute("DROP TABLE IF EXISTS tmp_wb_postings")
@@ -904,7 +950,7 @@ class OrdersService:
                         "INSERT OR IGNORE INTO tmp_wb_postings (posting_number) VALUES (?)",
                         [(x,) for x in part],
                     )
-                st_ph = ",".join("?" * len(WB_ACTIVE_SUPPLIER_STATUSES))
+                st_ph = ",".join("?" * len(WB_PORTAL_SUPPLIER_STATUSES))
                 cur_del = conn.execute(
                     f"""
                     DELETE FROM orders
@@ -912,9 +958,18 @@ class OrdersService:
                       AND status IN ({st_ph})
                       AND posting_number NOT IN (SELECT posting_number FROM tmp_wb_postings)
                     """,
-                    list(WB_ACTIVE_SUPPLIER_STATUSES),
+                    list(WB_PORTAL_SUPPLIER_STATUSES),
                 )
                 deleted = int(getattr(cur_del, "rowcount", 0) or 0)
+
+            # Отмены и прочие статусы вне воронки кабинета — убираем из локальной БД.
+            conn.execute(
+                """
+                DELETE FROM orders
+                WHERE marketplace = 'wb'
+                  AND status NOT IN ('new', 'confirm', 'complete', 'wbgo')
+                """
+            )
 
             # В кабинете WB «Новые» = лента /api/v3/orders/new, а не все supplierStatus=new из архива.
             conn.execute("UPDATE orders SET wb_in_new_feed = 0 WHERE marketplace = 'wb'")
@@ -925,6 +980,15 @@ class OrdersService:
                 )
 
             conn.commit()
+
+            if Config.WB_SYNC_BUILD_LABEL_PDF and wb_ids_for_labels:
+                n_lab = len(wb_ids_for_labels)
+                _p({"step": "wb_labels_start", "total": n_lab})
+                for li, order_id in enumerate(wb_ids_for_labels, start=1):
+                    self._sync_order_label_pdf(conn, order_id, fetch_ozon_for_size=False)
+                    conn.commit()
+                    if n_lab and (li == 1 or li % 40 == 0 or li == n_lab):
+                        _p({"step": "wb_labels_save", "current": li, "total": n_lab})
         except Exception:
             conn.rollback()
             raise
@@ -944,6 +1008,332 @@ class OrdersService:
             "total": len(by_id),
             "deleted": deleted,
             "wb_new_feed": len(new_ids_feed),
+        }
+
+    @staticmethod
+    def _wb_item_dict_from_order_item_row(it_row: Any) -> Dict[str, Any]:
+        """Собирает dict позиции как при нормализации WB (для _wb_apply_content_card_to_item)."""
+        return {
+            "sku": str(it_row["sku"] or ""),
+            "offer_id": str(it_row["offer_id"] or ""),
+            "name": str(it_row["product_name"] or ""),
+            "quantity": int(it_row["quantity"] or 0) or 1,
+            "price": float(it_row["price"] or 0),
+            "photo_url": str(it_row["photo_url"] or ""),
+            "category_leaf": str(it_row["category_leaf"] or ""),
+            "color": str(it_row["color"] or ""),
+            "barcode": str(it_row["barcode"] or ""),
+            "manufacturer_size": str(it_row["manufacturer_size"] or ""),
+        }
+
+    def enrich_wb_order_items_from_local_catalog(self) -> Dict[str, Any]:
+        """
+        Подтягивает название, фото, размер, категорию, цвет в order_items из wb_catalog.db по nmId в orders.raw_json.
+        Не вызывает Content API. Нужно после полной синхронизации каталога или если заказы были сохранены без enrich.
+        """
+        if not Config.WB_USE_CATALOG_FOR_CARDS:
+            return {
+                "items_updated": 0,
+                "orders_seen": 0,
+                "skipped": True,
+                "reason": "WB_USE_CATALOG_FOR_CARDS off",
+            }
+
+        conn = get_db_connection()
+        items_updated = 0
+        orders_seen = 0
+        orders_for_label: Set[int] = set()
+        try:
+            rows = list(
+                conn.execute(
+                    """
+                    SELECT id, raw_json FROM orders
+                    WHERE marketplace = 'wb'
+                      AND status IN ('new', 'confirm', 'complete', 'wbgo')
+                      AND raw_json IS NOT NULL
+                      AND TRIM(raw_json) != ''
+                    """
+                )
+            )
+            orders_seen = len(rows)
+
+            nm_to_order_ids: Dict[int, List[int]] = {}
+            order_raw: Dict[int, Dict[str, Any]] = {}
+            for row in rows:
+                oid = int(row["id"])
+                try:
+                    raw = json.loads(row["raw_json"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(raw, dict):
+                    continue
+                nm = raw.get("nmId")
+                if nm is None:
+                    continue
+                try:
+                    nmi = int(nm)
+                except (TypeError, ValueError):
+                    continue
+                nm_to_order_ids.setdefault(nmi, []).append(oid)
+                order_raw[oid] = raw
+
+            if not nm_to_order_ids:
+                return {"items_updated": 0, "orders_seen": orders_seen, "skipped": False}
+
+            cards = lookup_wb_cards(set(nm_to_order_ids.keys()))
+
+            for nmi, oids in nm_to_order_ids.items():
+                card = cards.get(nmi)
+                if not card:
+                    continue
+                for oid in oids:
+                    raw = order_raw.get(oid)
+                    if not raw:
+                        continue
+                    item_rows = conn.execute(
+                        "SELECT * FROM order_items WHERE order_id = ? ORDER BY id",
+                        (oid,),
+                    ).fetchall()
+                    for it_row in item_rows:
+                        item = self._wb_item_dict_from_order_item_row(it_row)
+                        self._wb_apply_content_card_to_item(item, raw, card)
+                        conn.execute(
+                            """
+                            UPDATE order_items SET
+                                product_name = ?,
+                                photo_url = ?,
+                                category_leaf = ?,
+                                color = ?,
+                                manufacturer_size = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                item["name"],
+                                item.get("photo_url", ""),
+                                item.get("category_leaf", ""),
+                                item.get("color", ""),
+                                item.get("manufacturer_size", ""),
+                                it_row["id"],
+                            ),
+                        )
+                        items_updated += 1
+                        orders_for_label.add(oid)
+
+            for oid in sorted(orders_for_label):
+                self._sync_order_label_pdf(conn, oid, fetch_ozon_for_size=False)
+                conn.commit()
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        return {
+            "items_updated": items_updated,
+            "orders_seen": orders_seen,
+            "skipped": False,
+        }
+
+    def sync_wb_catalog_for_new_orders_only(
+        self,
+        progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Карточки Content API только по nmId из заказов вкладки «Новые» (WB, лента /new),
+        запись в wb_catalog.db (если включено) и UPDATE order_items: название, фото, размер, категория.
+        """
+
+        def _p(ev: Dict[str, Any]) -> None:
+            if progress_cb:
+                progress_cb(ev)
+
+        conn = get_db_connection()
+        try:
+            order_rows = list(
+                conn.execute(
+                    """
+                    SELECT id, raw_json FROM orders
+                    WHERE marketplace = 'wb'
+                      AND status = 'new'
+                      AND COALESCE(wb_in_new_feed, 0) = 1
+                      AND raw_json IS NOT NULL
+                      AND TRIM(raw_json) != ''
+                    """
+                )
+            )
+        finally:
+            conn.close()
+
+        _p({"step": "wb_new_catalog_scan", "orders_in_tab_new": len(order_rows)})
+
+        nm_ids: Set[int] = set()
+        orders_payload: List[Tuple[int, Dict[str, Any]]] = []
+        for row in order_rows:
+            try:
+                raw = json.loads(row["raw_json"])
+            except (json.JSONDecodeError, TypeError):
+                self.logger.warning("WB order id=%s: битый raw_json", row["id"])
+                continue
+            if not isinstance(raw, dict):
+                continue
+            nm = raw.get("nmId")
+            if nm is None:
+                continue
+            try:
+                nmi = int(nm)
+            except (TypeError, ValueError):
+                continue
+            nm_ids.add(nmi)
+            orders_payload.append((int(row["id"]), raw))
+
+        if not nm_ids:
+            _p(
+                {
+                    "step": "wb_new_catalog_skip",
+                    "reason": "no_nmId",
+                    "orders_in_tab_new": len(order_rows),
+                }
+            )
+            return {
+                "ok": True,
+                "unique_nm": 0,
+                "orders_seen": len(order_rows),
+                "cards_fetched": 0,
+                "items_updated": 0,
+                "message": "Нет заказов «Новые» или без nmId в raw_json",
+            }
+
+        _p(
+            {
+                "step": "wb_new_catalog_start",
+                "unique_nm": len(nm_ids),
+                "orders": len(orders_payload),
+            }
+        )
+
+        cards: Dict[int, Dict[str, Any]] = {}
+        err_msg: Optional[str] = None
+        try:
+            if Config.WB_USE_CATALOG_FOR_CARDS:
+                cards = lookup_wb_cards(nm_ids)
+                _p(
+                    {
+                        "step": "wb_new_catalog_local",
+                        "found": len(cards),
+                        "needed": len(nm_ids),
+                    }
+                )
+            missing = set(nm_ids) - set(cards.keys())
+            if missing and Config.WB_CATALOG_FILL_GAPS_FROM_API:
+                _p(
+                    {
+                        "step": "wb_new_catalog_api_start",
+                        "missing_nm": len(missing),
+                    }
+                )
+                cc = WbContentClient()
+
+                def _content_progress(ev: Dict[str, Any]) -> None:
+                    _p({"step": "wb_new_catalog_api", **ev})
+
+                # Не гоняем весь каталог WB: API не умеет выборку по списку nmId, только textSearch по одному.
+                fetched = cc.fetch_cards_for_nm_ids(
+                    missing,
+                    progress_cb=_content_progress,
+                    use_catalog_pagination=False,
+                )
+                cards.update(fetched)
+                if fetched and Config.WB_CATALOG_SAVE_API_GAPS:
+                    try:
+                        save_wb_cards_to_catalog(fetched)
+                    except (OSError, sqlite3.Error) as exc:
+                        self.logger.warning("wb_catalog.db: не записали добор: %s", exc)
+        except WbContentError as exc:
+            err_msg = str(exc)
+            self.logger.warning("Content API (каталог для «Новые»): %s", exc)
+
+        _p(
+            {
+                "step": "wb_new_catalog_fetch_done",
+                "cards": len(cards),
+                "needed_nm": len(nm_ids),
+                "error": err_msg,
+            }
+        )
+
+        n_ord = len(orders_payload)
+        _p({"step": "wb_new_catalog_db_start", "total": n_ord})
+
+        items_updated = 0
+        conn = get_db_connection()
+        try:
+            for idx, (order_id, raw) in enumerate(orders_payload, start=1):
+                try:
+                    nmi = int(raw["nmId"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                card = cards.get(nmi)
+                if not card:
+                    continue
+                oi = conn.execute(
+                    "SELECT * FROM order_items WHERE order_id = ? ORDER BY id LIMIT 1",
+                    (order_id,),
+                ).fetchone()
+                if not oi:
+                    continue
+                item = dict(oi)
+                item["name"] = (item.get("product_name") or "").strip() or (
+                    str(item.get("offer_id") or "") or str(nmi)
+                )
+                self._wb_apply_content_card_to_item(item, raw, card)
+                cur = conn.execute(
+                    """
+                    UPDATE order_items SET
+                        product_name = ?,
+                        photo_url = ?,
+                        manufacturer_size = ?,
+                        category_leaf = ?,
+                        color = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        item.get("name") or "",
+                        item.get("photo_url") or "",
+                        item.get("manufacturer_size") or "",
+                        item.get("category_leaf") or "",
+                        item.get("color") or "",
+                        item["id"],
+                    ),
+                )
+                if cur.rowcount:
+                    items_updated += int(cur.rowcount)
+                    self._sync_order_label_pdf(conn, order_id, fetch_ozon_for_size=False)
+                if n_ord and (idx == 1 or idx % 20 == 0 or idx == n_ord):
+                    _p(
+                        {
+                            "step": "wb_new_catalog_db",
+                            "current": idx,
+                            "total": n_ord,
+                            "items_updated": items_updated,
+                        }
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        return {
+            "ok": err_msg is None or len(cards) > 0,
+            "unique_nm": len(nm_ids),
+            "orders_seen": len(order_rows),
+            "orders_parsed": len(orders_payload),
+            "cards_fetched": len(cards),
+            "items_updated": items_updated,
+            "error": err_msg,
         }
 
     def _upsert_order(self, conn, order: Dict[str, Any]) -> Tuple[bool, int]:
@@ -1109,12 +1499,33 @@ class OrdersService:
                         posting,
                     )
 
-        rel = write_order_label_pdf(
-            order_id,
-            pages,
-            target_page_pt=target_pt,
-            target_fit_letterbox=fit_letterbox,
-        )
+        try:
+            rel = write_order_label_pdf(
+                order_id,
+                pages,
+                target_page_pt=target_pt,
+                target_fit_letterbox=fit_letterbox,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            global _label_template_unavailable_logged
+            if not _label_template_unavailable_logged:
+                _label_template_unavailable_logged = True
+                self.logger.warning(
+                    "Этикетки ШК не создаются: %s. "
+                    "Задайте LABEL_TEMPLATE_PDF в .env или положите print_2026_03_25_21_41.pdf в корень проекта.",
+                    exc,
+                )
+            conn.execute("UPDATE orders SET label_pdf_path = NULL WHERE id = ?", (order_id,))
+            if old:
+                self._unlink_label_file(old)
+            return
+        except Exception as exc:
+            self.logger.warning("Не удалось собрать PDF этикетки для order_id=%s: %s", order_id, exc)
+            conn.execute("UPDATE orders SET label_pdf_path = NULL WHERE id = ?", (order_id,))
+            if old:
+                self._unlink_label_file(old)
+            return
+
         conn.execute(
             "UPDATE orders SET label_pdf_path = ? WHERE id = ?",
             (rel, order_id),
@@ -1133,13 +1544,13 @@ class OrdersService:
                 oid = int(r["id"])
                 self._sync_order_label_pdf(conn, oid)
                 n_orders += 1
+                conn.commit()
                 row2 = conn.execute(
                     "SELECT label_pdf_path FROM orders WHERE id = ?",
                     (oid,),
                 ).fetchone()
                 if row2 and (row2["label_pdf_path"] or "").strip():
                     n_with_pdf += 1
-            conn.commit()
         except Exception:
             conn.rollback()
             raise
@@ -1240,7 +1651,10 @@ class OrdersService:
             if marketplace == "wb" and status == "new":
                 where.append("o.status = 'new'")
                 where.append("COALESCE(o.wb_in_new_feed, 0) = 1")
+            elif marketplace == "wb" and status == "in_delivery":
+                where.append("o.status IN ('complete', 'wbgo')")
             elif marketplace == "wb" and status == "new_stale":
+                # Старые ссылки: всё ещё status=new, но без фильтра ленты
                 where.append("o.status = 'new'")
                 where.append("COALESCE(o.wb_in_new_feed, 0) = 0")
             elif status and status != "all":
@@ -1318,12 +1732,9 @@ class OrdersService:
             status_counts = {str(s["status"]): int(s["cnt"]) for s in statuses if s["status"]}
             if marketplace == "wb":
                 status_options = [
-                    {
-                        "value": s["status"],
-                        "label": WB_STATUS_LABELS.get(s["status"], s["status"] or "-"),
-                    }
-                    for s in statuses
-                    if s["status"]
+                    {"value": "new", "label": "Новые"},
+                    {"value": "confirm", "label": "На сборке"},
+                    {"value": "in_delivery", "label": "В доставке"},
                 ]
                 new_feed_n = conn.execute(
                     """
@@ -1331,29 +1742,21 @@ class OrdersService:
                     WHERE marketplace = 'wb' AND status = 'new' AND COALESCE(wb_in_new_feed, 0) = 1
                     """
                 ).fetchone()["cnt"]
-                new_stale_n = conn.execute(
+                in_delivery_n = conn.execute(
                     """
                     SELECT COUNT(*) as cnt FROM orders
-                    WHERE marketplace = 'wb' AND status = 'new' AND COALESCE(wb_in_new_feed, 0) = 0
+                    WHERE marketplace = 'wb' AND status IN ('complete', 'wbgo')
                     """
                 ).fetchone()["cnt"]
                 wb_tabs_order = [
                     ("new", "Новые"),
-                    ("new_stale", "New не в ленте"),
-                    ("confirm", "В сборке"),
-                    ("complete", "В доставке"),
-                    ("wbgo", "Передача в доставку"),
-                    ("cancel", "Отменён продавцом"),
-                    ("cancel_carrier", "Отменён перевозчиком"),
+                    ("confirm", "На сборке"),
+                    ("in_delivery", "В доставке"),
                 ]
                 tab_counts = {
                     "new": int(new_feed_n),
-                    "new_stale": int(new_stale_n),
                     "confirm": int(status_counts.get("confirm", 0)),
-                    "complete": int(status_counts.get("complete", 0)),
-                    "wbgo": int(status_counts.get("wbgo", 0)),
-                    "cancel": int(status_counts.get("cancel", 0)),
-                    "cancel_carrier": int(status_counts.get("cancel_carrier", 0)),
+                    "in_delivery": int(in_delivery_n),
                 }
                 status_tabs = [
                     {"value": code, "label": label, "count": tab_counts.get(code, 0)}
@@ -1400,7 +1803,7 @@ class OrdersService:
                         order.get("status") == "new"
                         and not int(order.get("wb_in_new_feed") or 0)
                     ):
-                        order["status_label"] = "Новый · не в ленте WB"
+                        order["status_label"] = "Новые · не в ленте /new"
                     else:
                         order["status_label"] = WB_STATUS_LABELS.get(
                             order.get("status"), order.get("status") or "-"

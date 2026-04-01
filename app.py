@@ -25,10 +25,12 @@ from flask import (
 
 from api_clients.ozon_client import OzonApiError
 from api_clients.wb_client import WbApiError
+from api_clients.wb_content_client import WbContentError
 from config import Config
 from database.catalog_db import init_catalog_db
 from database.db import init_db
 from services.orders_service import OrdersService
+from services.wb_catalog_service import run_full_wb_catalog_sync
 from utils.helpers import parse_int
 from utils.ozon_label_cache import (
     load_cached_ozon_label,
@@ -209,7 +211,7 @@ def create_app():
 
     @app.get("/orders_wb")
     def orders_wb():
-        status = request.args.get("status", "all")
+        status = request.args.get("status", "new")
         date_from = request.args.get("date_from", "")
         date_to = request.args.get("date_to", "")
         query = request.args.get("q", "")
@@ -239,7 +241,7 @@ def create_app():
 
     @app.get("/orders_wb/load-more")
     def orders_wb_load_more():
-        status = request.args.get("status", "all")
+        status = request.args.get("status", "new")
         date_from = request.args.get("date_from", "")
         date_to = request.args.get("date_to", "")
         query = request.args.get("q", "")
@@ -282,10 +284,162 @@ def create_app():
                 )
             else:
                 flash(str(exc), "error")
-        except Exception:
+        except Exception as exc:
             logging.exception("Неожиданная ошибка при обновлении заказов WB")
-            flash("Не удалось получить данные из API Wildberries", "error")
-        return redirect(url_for("orders_wb"))
+            flash(
+                (str(exc) or "").strip()
+                or "Не удалось выполнить синхронизацию Wildberries (см. logs/app.log).",
+                "error",
+            )
+        return redirect(url_for("orders_wb", status="new"))
+
+    @app.post("/orders_wb/sync-catalog-new")
+    def sync_wb_catalog_new_orders():
+        """Content API: название/фото/размер/категория только для заказов вкладки «Новые»."""
+        try:
+            stats = service.sync_wb_catalog_for_new_orders_only()
+            if stats.get("message"):
+                flash(stats["message"], "info")
+            else:
+                flash(
+                    f"Каталог для «Новые»: уникальных nm {stats.get('unique_nm', 0)}, "
+                    f"карточек {stats.get('cards_fetched', 0)}, "
+                    f"обновлено позиций {stats.get('items_updated', 0)}.",
+                    "success" if stats.get("ok") else "warning",
+                )
+            if stats.get("error"):
+                flash(str(stats["error"]), "warning")
+        except Exception:
+            logging.exception("sync_wb_catalog_for_new_orders_only")
+            flash("Не удалось подтянуть карточки для заказов «Новые»", "error")
+        return redirect(url_for("orders_wb", status="new"))
+
+    @app.post("/orders_wb/sync-catalog-new-stream")
+    def sync_wb_catalog_new_orders_stream():
+        """NDJSON: прогресс «Подтянуть карточки для Новые» (Content API + обновление order_items)."""
+
+        def generate():
+            q: queue.Queue = queue.Queue()
+
+            def worker():
+                try:
+                    def cb(ev):
+                        q.put(("progress", ev))
+
+                    result = service.sync_wb_catalog_for_new_orders_only(progress_cb=cb)
+                    q.put(("done", result))
+                except WbContentError as exc:
+                    q.put(("err", str(exc)))
+                except sqlite3.OperationalError as exc:
+                    if "locked" in str(exc).lower():
+                        q.put(
+                            (
+                                "err",
+                                "База данных занята. Подождите и повторите.",
+                            )
+                        )
+                    else:
+                        q.put(("err", str(exc)))
+                except Exception:
+                    logging.exception("Стрим: sync_wb_catalog_for_new_orders_only")
+                    q.put(("err", "Не удалось подтянуть карточки"))
+
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            while True:
+                kind, payload = q.get()
+                if kind == "progress":
+                    line = json.dumps({"type": "progress", **payload}, ensure_ascii=False) + "\n"
+                    yield line
+                elif kind == "done":
+                    yield json.dumps({"type": "done", "result": payload}, ensure_ascii=False) + "\n"
+                    break
+                elif kind == "err":
+                    yield json.dumps({"type": "error", "message": payload}, ensure_ascii=False) + "\n"
+                    break
+            thread.join(timeout=2.0)
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="application/x-ndjson",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/orders_wb/sync-full-catalog-stream")
+    def sync_wb_full_catalog_stream():
+        """NDJSON: полная синхронизация каталога WB в wb_catalog.db (Content API, постранично)."""
+
+        def generate():
+            cancel_event = threading.Event()
+            q: queue.Queue = queue.Queue()
+
+            def worker():
+                try:
+
+                    def cb(ev):
+                        q.put(("progress", ev))
+
+                    result = run_full_wb_catalog_sync(
+                        progress_cb=cb,
+                        cancel_check=cancel_event.is_set,
+                    )
+                    try:
+                        if not result.get("skipped"):
+                            enrich_stats = service.enrich_wb_order_items_from_local_catalog()
+                            result["order_items_enriched"] = int(
+                                enrich_stats.get("items_updated") or 0
+                            )
+                    except Exception:
+                        logging.exception(
+                            "После синхронизации каталога WB: enrich_wb_order_items_from_local_catalog"
+                        )
+                    q.put(("done", result))
+                except sqlite3.OperationalError as exc:
+                    if "locked" in str(exc).lower():
+                        q.put(
+                            (
+                                "err",
+                                "База данных занята. Подождите и повторите.",
+                            )
+                        )
+                    else:
+                        q.put(("err", str(exc)))
+                except Exception:
+                    logging.exception("Стрим: run_full_wb_catalog_sync")
+                    q.put(("err", "Не удалось синхронизировать каталог WB"))
+
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            try:
+                while True:
+                    kind, payload = q.get()
+                    if kind == "progress":
+                        line = json.dumps({"type": "progress", **payload}, ensure_ascii=False) + "\n"
+                        yield line
+                    elif kind == "done":
+                        yield json.dumps({"type": "done", "result": payload}, ensure_ascii=False) + "\n"
+                        break
+                    elif kind == "err":
+                        yield json.dumps({"type": "error", "message": payload}, ensure_ascii=False) + "\n"
+                        break
+            except GeneratorExit:
+                cancel_event.set()
+                raise
+            finally:
+                cancel_event.set()
+                thread.join(timeout=90.0)
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="application/x-ndjson",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.post("/orders_wb/update-json")
     def update_orders_wb_json():
@@ -317,9 +471,20 @@ def create_app():
             else:
                 msg = str(exc)
             return jsonify({"ok": False, "message": msg}), 503
-        except Exception:
+        except Exception as exc:
             logging.exception("Неожиданная ошибка при обновлении заказов WB")
-            return jsonify({"ok": False, "message": "Не удалось получить данные из API Wildberries"}), 500
+            detail = (str(exc) or "").strip()
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "message": detail
+                        if detail
+                        else "Не удалось выполнить синхронизацию Wildberries (см. logs/app.log).",
+                    }
+                ),
+                500,
+            )
 
     @app.post("/orders_wb/update-stream")
     def update_orders_wb_stream():
@@ -355,9 +520,17 @@ def create_app():
                         )
                     else:
                         q.put(("err", str(exc)))
-                except Exception:
+                except Exception as exc:
                     logging.exception("Стрим: ошибка синхронизации WB")
-                    q.put(("err", "Не удалось получить данные из API Wildberries"))
+                    detail = (str(exc) or "").strip()
+                    q.put(
+                        (
+                            "err",
+                            detail
+                            if detail
+                            else "Не удалось выполнить синхронизацию Wildberries (см. logs/app.log).",
+                        )
+                    )
 
             thread = threading.Thread(target=worker, daemon=True)
             thread.start()
@@ -487,7 +660,7 @@ def create_app():
         if not rel:
             flash("Нет этикетки: у позиций заказа нет штрихкода.", "error")
             mp = service.get_order_marketplace(order_id)
-            fallback = url_for("orders_wb") if mp == "wb" else url_for("orders")
+            fallback = url_for("orders_wb", status="new") if mp == "wb" else url_for("orders")
             return redirect(request.referrer or fallback)
         path = os.path.join(Config.BASE_DIR, rel.replace("/", os.sep))
         posting = service.get_order_posting_number(order_id) or str(order_id)
@@ -1042,7 +1215,7 @@ def create_app():
 
     @app.cli.command("sync-wb-catalog")
     def sync_wb_catalog_command():
-        """Полная выгрузка каталога WB в instance/wb_catalog.db (удобно для cron)."""
+        """Полная выгрузка каталога WB в instance/wb_catalog.db (cron). Параллельный запуск блокируется lock-файлом."""
         import sys
 
         from services.wb_catalog_service import run_full_wb_catalog_sync
@@ -1053,6 +1226,34 @@ def create_app():
             print(ev, file=sys.stderr, flush=True)
 
         stats = run_full_wb_catalog_sync(progress_cb=_pr)
+        if not stats.get("skipped"):
+            try:
+                en = service.enrich_wb_order_items_from_local_catalog()
+                stats["order_items_enriched"] = int(en.get("items_updated") or 0)
+            except Exception:
+                logging.exception("enrich_wb_order_items_from_local_catalog после sync-wb-catalog")
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
+
+    @app.cli.command("enrich-wb-items-catalog")
+    def enrich_wb_items_catalog_command():
+        """Обновить order_items из wb_catalog.db по nmId (без Content API)."""
+        import sys
+
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+        stats = service.enrich_wb_order_items_from_local_catalog()
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
+
+    @app.cli.command("sync-wb-catalog-new")
+    def sync_wb_catalog_new_command():
+        """Карточки Content API только для заказов «Новые» (WB) → wb_catalog.db + order_items."""
+        import sys
+
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+
+        def _pr(ev):
+            print(ev, file=sys.stderr, flush=True)
+
+        stats = service.sync_wb_catalog_for_new_orders_only(progress_cb=_pr)
         print(json.dumps(stats, ensure_ascii=False, indent=2))
 
     return app

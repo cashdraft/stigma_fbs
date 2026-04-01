@@ -387,18 +387,188 @@ document.addEventListener("DOMContentLoaded", () => {
     if (step === "database_save") {
       return `${head}\nБД: записано ${ev.current} / ${ev.total}`;
     }
+    if (step === "wb_labels_start") {
+      return `${head}\nГенерация этикеток ШК (PDF): ${ev.total} заказов…`;
+    }
+    if (step === "wb_labels_save") {
+      return `${head}\nШК: готово ${ev.current} / ${ev.total}`;
+    }
     return `${head}\nОжидание ответа сервера…`;
   }
 
-  async function runWbJsonSync(form, disableEls) {
-    if (!form || !updateWbProgressModal || !updateWbProgressStage) return;
+  function wbFullCatalogProgressText(ev, sec) {
+    const head = `Прошло: ${sec} сек`;
+    const step = ev && ev.step;
+    if (step === "wb_full_catalog_skip_lock") {
+      return `${head}\nУже выполняется другая полная синхронизация каталога (lock). Этот запуск пропущен.`;
+    }
+    if (step === "wb_full_catalog_start") {
+      return `${head}\nContent API: постраничный обход каталога, запись в wb_catalog.db (только нужные поля карточек)…`;
+    }
+    if (step === "wb_full_catalog_page") {
+      const pg = ev.page != null ? ev.page : "—";
+      const batch = ev.batch != null ? ev.batch : 0;
+      const cw = ev.cards_written != null ? ev.cards_written : 0;
+      return `${head}\nСтраница каталога: ${pg} · в пачке карточек: ${batch} · всего upsert в БД: ${cw}`;
+    }
+    if (step === "wb_full_catalog_pages_done") {
+      const pg = ev.pages != null ? ev.pages : 0;
+      const bc = ev.batches_committed != null ? ev.batches_committed : 0;
+      const cu = ev.cards_upserted != null ? ev.cards_upserted : 0;
+      return `${head}\nОбход завершён: страниц ${pg}, пачек ${bc}, карточек записано: ${cu}\nСохранение служебных метаданных…`;
+    }
+    return `${head}\nПодготовка…`;
+  }
+
+  const updateWbProgressTitleEl = document.getElementById("update-wb-progress-title");
+  const WB_PROGRESS_TITLE_DEFAULT = "Обновление заказов Wildberries";
+  const WB_PROGRESS_TITLE_FULL_CATALOG = "Синхронизация каталога Wildberries";
+
+  async function runWbFullCatalogSync(disableEls) {
+    if (!updateWbProgressModal || !updateWbProgressStage) return;
     const els = (disableEls || []).filter(Boolean);
-    if (els.some((el) => el.disabled)) return;
+    if (els.some((el) => el.disabled) || updateWbInFlight) return;
 
     els.forEach((el) => {
       el.disabled = true;
     });
 
+    if (updateWbProgressTitleEl) {
+      updateWbProgressTitleEl.textContent = WB_PROGRESS_TITLE_FULL_CATALOG;
+    }
+    openUpdateWbModal();
+    setUpdateWbStage("Прошло: 0 сек\nЗапуск полной синхронизации каталога…", "progress");
+    if (updateWbProgressClose) {
+      updateWbProgressClose.textContent = "Отменить";
+      updateWbProgressClose.disabled = false;
+    }
+
+    const startedAt = Date.now();
+    let lastProgressEv = null;
+    const tick = setInterval(() => {
+      const s = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+      setUpdateWbStage(wbFullCatalogProgressText(lastProgressEv, s), "progress");
+    }, 400);
+
+    updateWbAbortController = new AbortController();
+    updateWbInFlight = true;
+
+    try {
+      const res = await fetch("/orders_wb/sync-full-catalog-stream", {
+        method: "POST",
+        body: new FormData(),
+        signal: updateWbAbortController.signal,
+      });
+      if (!res.ok) {
+        let msg = `Ошибка ${res.status}`;
+        try {
+          const errJson = await res.json();
+          if (errJson && errJson.message) msg = errJson.message;
+        } catch (_) {
+          /* ignore */
+        }
+        throw new Error(msg);
+      }
+      const reader = res.body && res.body.getReader ? res.body.getReader() : null;
+      if (!reader) {
+        throw new Error("Браузер не поддерживает потоковый ответ");
+      }
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let result = null;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (let i = 0; i < lines.length; i += 1) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          let obj;
+          try {
+            obj = JSON.parse(line);
+          } catch (_) {
+            continue;
+          }
+          if (obj.type === "progress") {
+            lastProgressEv = obj;
+            const s = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+            setUpdateWbStage(wbFullCatalogProgressText(obj, s), "progress");
+          } else if (obj.type === "done") {
+            result = obj.result || {};
+          } else if (obj.type === "error") {
+            throw new Error((obj && obj.message) || "Ошибка");
+          }
+        }
+      }
+      clearInterval(tick);
+      const s = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+      if (result == null) {
+        throw new Error("Соединение оборвалось до завершения");
+      }
+      const skipped = result && result.skipped;
+      const wasCancelled = result && result.cancelled;
+      const errApi = (result && result.error) || "";
+      const pages = Number((result && result.pages) || 0);
+      const cu = Number((result && result.cards_upserted) || 0);
+      const lines = [`Готово за ${s} сек.`];
+      if (skipped) {
+        lines.push("Другой процесс уже выполняет полную синхронизацию каталога. Повторите позже.");
+      } else if (wasCancelled) {
+        lines.push(
+          `Остановлено по отмене. Уже записано: страниц ${pages}, карточек (upsert) ${cu}. Метаданные «полной синхронизации» не обновлялись.`,
+        );
+      } else if (result && result.ok) {
+        lines.push(
+          `Страниц каталога: ${pages} · карточек (upsert): ${cu}. Локальный wb_catalog.db обновлён.`,
+        );
+        const oie = Number((result && result.order_items_enriched) || 0);
+        if (oie > 0) {
+          lines.push(`Строк заказов обновлено из каталога: ${oie}.`);
+        }
+      } else {
+        lines.push(errApi ? `Ошибка Content API / синхронизации:\n${errApi}` : "Синхронизация завершилась с ошибкой.");
+      }
+      const kind = skipped || (result && result.ok) ? "success" : wasCancelled ? "cancelled" : "error";
+      setUpdateWbStage(lines.join("\n"), kind);
+    } catch (err) {
+      clearInterval(tick);
+      const s = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+      if (err && err.name === "AbortError") {
+        setUpdateWbStage(
+          `Отмена: соединение закрыто, на сервере обход каталога останавливается (не начнётся новая страница WB).\nУже записанные в БД карточки сохраняются. Прошло: ${s} сек.`,
+          "cancelled",
+        );
+      } else {
+        setUpdateWbStage(`Ошибка через ${s} сек:\n${err.message || "неизвестно"}`, "error");
+      }
+    } finally {
+      clearInterval(tick);
+      updateWbInFlight = false;
+      updateWbAbortController = null;
+      els.forEach((el) => {
+        el.disabled = false;
+      });
+      if (updateWbProgressClose) updateWbProgressClose.textContent = "Закрыть";
+      if (updateWbProgressTitleEl) {
+        updateWbProgressTitleEl.textContent = WB_PROGRESS_TITLE_DEFAULT;
+      }
+    }
+  }
+
+  async function runWbJsonSync(form, disableEls) {
+    if (!form || !updateWbProgressModal || !updateWbProgressStage) return;
+    const els = (disableEls || []).filter(Boolean);
+    if (els.some((el) => el.disabled) || updateWbInFlight) return;
+
+    els.forEach((el) => {
+      el.disabled = true;
+    });
+
+    if (updateWbProgressTitleEl) {
+      updateWbProgressTitleEl.textContent = WB_PROGRESS_TITLE_DEFAULT;
+    }
     openUpdateWbModal();
     setUpdateWbStage("Прошло: 0 сек\nЗапуск синхронизации…", "progress");
     if (updateWbProgressClose) {
@@ -506,10 +676,27 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const updateWbForm = document.getElementById("update-wb-form");
   const updateWbBtn = document.getElementById("update-wb-btn");
+  const syncWbFullCatalogForm = document.getElementById("sync-wb-full-catalog-form");
+  const syncWbFullCatalogBtn = document.getElementById("sync-wb-full-catalog-btn");
+  const wbOrdersActionEls = [updateWbBtn, syncWbFullCatalogBtn].filter(Boolean);
+
   if (updateWbForm && updateWbBtn && updateWbProgressModal && updateWbProgressStage && updateWbProgressClose) {
     updateWbForm.addEventListener("submit", async (e) => {
       e.preventDefault();
-      await runWbJsonSync(updateWbForm, [updateWbBtn]);
+      await runWbJsonSync(updateWbForm, wbOrdersActionEls);
+    });
+  }
+
+  if (
+    syncWbFullCatalogForm &&
+    syncWbFullCatalogBtn &&
+    updateWbProgressModal &&
+    updateWbProgressStage &&
+    updateWbProgressClose
+  ) {
+    syncWbFullCatalogForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      await runWbFullCatalogSync(wbOrdersActionEls);
     });
   }
 

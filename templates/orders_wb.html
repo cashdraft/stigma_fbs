@@ -18,6 +18,11 @@
       <input type="hidden" name="to" value="{{ filters.date_to }}" />
       <button type="submit" class="btn" id="update-wb-btn">Синхронизировать с Wildberries</button>
     </form>
+    <form method="post" action="#" class="inline-form" id="sync-wb-full-catalog-form">
+      <button type="submit" class="btn btn-secondary" id="sync-wb-full-catalog-btn" title="Полный обход каталога Wildberries: сохраняем в wb_catalog.db только поля для отображения заказов (название, фото, размер, категория, цвет)">
+        Синхронизация каталога
+      </button>
+    </form>
   </section>
 
   <div class="status-toolbar">

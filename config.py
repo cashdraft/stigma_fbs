@@ -39,7 +39,8 @@ class Config:
     # Лимит Content API ~100 запросов/мин; меньше значение — риск 429 и «подвисаний».
     WB_CONTENT_MIN_INTERVAL = float(os.getenv("WB_CONTENT_MIN_INTERVAL", "0.65"))
     # При числе уникальных nmId >= порога тянем каталог пачками по 100 (быстрее, чем textSearch на каждый nm).
-    WB_CONTENT_PAGINATE_MIN_NM = int(os.getenv("WB_CONTENT_PAGINATE_MIN_NM", "25"))
+    # Ниже порога — только textSearch по nmId (удобно при небольшой воронке заказов).
+    WB_CONTENT_PAGINATE_MIN_NM = int(os.getenv("WB_CONTENT_PAGINATE_MIN_NM", "15"))
 
     # Отдельная SQLite с карточками WB (полная выгрузка ночью / вручную).
     WB_CATALOG_DB_PATH = os.getenv(
@@ -67,8 +68,26 @@ class Config:
         "no",
         "off",
     )
+    # Эксклюзивный lock на полную синхронизацию каталога (cron + ручной запуск не пересекаются).
+    WB_CATALOG_SYNC_USE_LOCK = os.getenv("WB_CATALOG_SYNC_USE_LOCK", "1").lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    WB_CATALOG_SYNC_LOCK_PATH = os.getenv(
+        "WB_CATALOG_SYNC_LOCK_PATH",
+        os.path.join(BASE_DIR, "instance", "wb_catalog_sync.lock"),
+    )
     # Если WB отвечает 401, попробуйте WB_USE_BEARER_PREFIX=1 (заголовок Authorization: Bearer <токен>).
     WB_USE_BEARER_PREFIX = os.getenv("WB_USE_BEARER_PREFIX", "").lower() in ("1", "true", "yes")
+    # Генерация PDF этикеток (ШК) после сохранения заказов — не в одной длинной транзакции с INSERT (меньше database locked).
+    WB_SYNC_BUILD_LABEL_PDF = os.getenv("WB_SYNC_BUILD_LABEL_PDF", "1").lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
     LABEL_FONT_PATH = os.getenv(
         "LABEL_FONT_PATH",
@@ -88,6 +107,10 @@ class Config:
     _label_h_default = "30"
     LABEL_WIDTH_MM = float(os.getenv("LABEL_WIDTH_MM", _label_w_default))
     LABEL_HEIGHT_MM = float(os.getenv("LABEL_HEIGHT_MM", _label_h_default))
+
+    # Ожидание блокировки SQLite (параллельно идёт синхронизация WB + запросы UI).
+    SQLITE_CONNECT_TIMEOUT_SEC = int(os.getenv("SQLITE_CONNECT_TIMEOUT_SEC", "120"))
+    SQLITE_BUSY_TIMEOUT_MS = int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "120000"))
 
     DEFAULT_PAGE_SIZE = 100
     ORDERS_CHUNK_SIZE = 100

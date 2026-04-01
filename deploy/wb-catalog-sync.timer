@@ -1,0 +1,15 @@
+[Unit]
+Description=Раз в сутки — синхронизация каталога WB (Stigma FBS)
+Documentation=file:///srv/stigma_fbs/deploy/wb-catalog-sync.timer
+
+[Timer]
+# Каждый день в 03:15 UTC (см. timedatectl; при желании замените на локальное время)
+OnCalendar=*-*-* 03:15:00
+# Если сервер был выключен в момент запуска — выполнить после включения
+Persistent=true
+# Размазать старт до 30 мин, чтобы не биться с другими задачами в 03:15
+RandomizedDelaySec=30m
+Unit=wb-catalog-sync.service
+
+[Install]
+WantedBy=timers.target

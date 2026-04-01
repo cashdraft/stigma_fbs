@@ -1,0 +1,24 @@
+[Unit]
+Description=Stigma FBS — полная синхронизация каталога Wildberries (wb_catalog.db + order_items)
+Documentation=file:///srv/stigma_fbs/sync_wb_catalog.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/stigma_fbs
+# Установите путь к интерпретатору из venv проекта
+ExecStart=/srv/stigma_fbs/.venv/bin/python3 /srv/stigma_fbs/sync_wb_catalog.py
+# Раскомментируйте и задайте пользователя, под которым крутится приложение (права на instance/, logs/)
+# User=stigma
+# Group=stigma
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wb-catalog-sync
+
+# Таймаут: большой каталог + лимиты API; при необходимости увеличьте
+TimeoutStartSec=3h
+
+[Install]
+WantedBy=multi-user.target
