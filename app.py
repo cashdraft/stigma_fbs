@@ -1,13 +1,15 @@
 import json
 import logging
 import os
+
+import click
 import queue
 import re
 import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List
+from typing import List, Optional
 
 import fitz
 from flask import (
@@ -1255,6 +1257,33 @@ def create_app():
 
         stats = service.sync_wb_catalog_for_new_orders_only(progress_cb=_pr)
         print(json.dumps(stats, ensure_ascii=False, indent=2))
+
+    @app.cli.command("rebuild-label-pdfs")
+    @click.option(
+        "--fetch-ozon-sizes/--no-fetch-ozon-sizes",
+        default=False,
+        help="Для Ozon подтянуть этикетку с API, чтобы подогнать размер страницы (медленно).",
+    )
+    @click.option(
+        "--marketplace",
+        "marketplace_filter",
+        default=None,
+        help="Только заказы этого маркетплейса: ozon или wb (по умолчанию — все).",
+    )
+    def rebuild_label_pdfs_command(fetch_ozon_sizes: bool, marketplace_filter: Optional[str]):
+        """Пересоздать instance/labels/order_*.pdf для всех заказов (после смены шаблона и т.п.)."""
+        import sys
+
+        mf = (marketplace_filter or "").strip().lower() or None
+        if mf and mf not in ("ozon", "wb"):
+            raise click.BadParameter("ожидается ozon или wb", param_hint="--marketplace")
+
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+        stats = service.rebuild_all_label_pdfs(
+            fetch_ozon_for_size=fetch_ozon_sizes,
+            marketplace=mf,
+        )
+        print(json.dumps(stats, ensure_ascii=False, indent=2), file=sys.stdout)
 
     return app
 

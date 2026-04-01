@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -1533,16 +1534,36 @@ class OrdersService:
         if old and old != rel:
             self._unlink_label_file(old)
 
-    def rebuild_all_label_pdfs(self) -> Dict[str, int]:
-        """Пересоздать PDF этикетки для каждого заказа (по строкам order_items с баркодом)."""
+    def rebuild_all_label_pdfs(
+        self,
+        *,
+        fetch_ozon_for_size: bool = False,
+        marketplace: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Пересоздать PDF этикетки для каждого заказа (по строкам order_items с баркодом).
+
+        После смены LABEL_TEMPLATE_PDF вызовите с fetch_ozon_for_size=False (быстро).
+        Для Ozon с пустым кэшем размеров страницы — True (запросы к API по каждому заказу Ozon).
+        marketplace: если задан (например \"ozon\", \"wb\"), только эти заказы.
+        """
         conn = get_db_connection()
         n_orders = 0
         n_with_pdf = 0
         try:
-            rows = conn.execute("SELECT id FROM orders ORDER BY id").fetchall()
-            for r in rows:
+            mp = (marketplace or "").strip().lower()
+            if mp:
+                rows = conn.execute(
+                    "SELECT id FROM orders WHERE LOWER(TRIM(marketplace)) = ? ORDER BY id",
+                    (mp,),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT id FROM orders ORDER BY id").fetchall()
+            total = len(rows)
+            for idx, r in enumerate(rows, start=1):
                 oid = int(r["id"])
-                self._sync_order_label_pdf(conn, oid)
+                self._sync_order_label_pdf(
+                    conn, oid, fetch_ozon_for_size=fetch_ozon_for_size
+                )
                 n_orders += 1
                 conn.commit()
                 row2 = conn.execute(
@@ -1551,17 +1572,29 @@ class OrdersService:
                 ).fetchone()
                 if row2 and (row2["label_pdf_path"] or "").strip():
                     n_with_pdf += 1
+                if total >= 20 and (idx % 50 == 0 or idx == total):
+                    tag = f" marketplace={mp}" if mp else ""
+                    print(
+                        f"rebuild-label-pdfs{tag}: {idx}/{total}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
         self.logger.info(
-            "Пересборка этикеток: заказов=%s, с PDF=%s",
+            "Пересборка этикеток: заказов=%s, с PDF=%s%s",
             n_orders,
             n_with_pdf,
+            f", marketplace={mp}" if mp else "",
         )
-        return {"orders": n_orders, "with_label_pdf": n_with_pdf}
+        return {
+            "orders": n_orders,
+            "with_label_pdf": n_with_pdf,
+            **({"marketplace": mp} if mp else {}),
+        }
 
     def ensure_order_label_pdf_file(self, order_id: int) -> Optional[str]:
         conn = get_db_connection()
