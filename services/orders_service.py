@@ -28,6 +28,7 @@ from utils.ozon_label_cache import (
     load_cached_ozon_label,
 )
 from utils.ozon_tariff import parse_shipment_tariff_from_raw
+from utils.wb_label_cache import save_cached_wb_label
 
 EXCLUDED_STATUSES = {"delivered", "cancelled"}
 STATUS_LABELS = {
@@ -49,7 +50,8 @@ WB_STATUS_LABELS = {
 # supplierStatus из /orders/status — только активная воронка; остальное не пишем и вычищаем из БД.
 WB_PORTAL_SUPPLIER_STATUSES = frozenset({"new", "confirm", "complete", "wbgo"})
 
-SHIPMENT_NAME_PREFIX = "OZON_"
+SHIPMENT_NAME_PREFIX_OZON = "OZON_"
+SHIPMENT_NAME_PREFIX_WB = "WB_"
 
 # Один раз в лог — если шаблон этикетки недоступен при массовой синхронизации
 _label_template_unavailable_logged = False
@@ -119,9 +121,11 @@ RU_MONTHS_SHORT = {
 }
 
 
-def _shipment_date_prefix(d: Optional[date] = None) -> str:
+def _shipment_date_prefix(d: Optional[date] = None, marketplace: str = "ozon") -> str:
     day = d or datetime.now().date()
-    return f"{SHIPMENT_NAME_PREFIX}{day.strftime('%d.%m.%y')}/"
+    mp = (marketplace or "ozon").strip().lower()
+    prefix = SHIPMENT_NAME_PREFIX_WB if mp == "wb" else SHIPMENT_NAME_PREFIX_OZON
+    return f"{prefix}{day.strftime('%d.%m.%y')}/"
 
 
 def _format_ru_short_datetime(value: Optional[str]) -> str:
@@ -141,10 +145,109 @@ def _format_ru_short_datetime(value: Optional[str]) -> str:
     return f"{dt.day:02d} {month} {dt:%H:%M}"
 
 
+def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = datetime.strptime(raw[:16].replace("T", " "), "%Y-%m-%d %H:%M")
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _wb_elapsed_tariff(created_at: Optional[str]) -> Dict[str, Any]:
+    dt = _parse_iso_dt(created_at)
+    if not dt:
+        return {
+            "label": "—",
+            "hint": "",
+            "segment_active": 0,
+            "segment_count": 0,
+            "age_level": "",
+        }
+    now = datetime.now(timezone.utc)
+    delta = now - dt.astimezone(timezone.utc)
+    if delta.total_seconds() < 0:
+        delta = timedelta(0)
+    total_minutes = int(delta.total_seconds() // 60)
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    label = f"{hours} ч {minutes} мин"
+    if hours < 15:
+        level = "green"
+    elif hours < 24:
+        level = "yellow"
+    else:
+        level = "red"
+    return {
+        "label": label,
+        "hint": "",
+        "segment_active": 0,
+        "segment_count": 0,
+        "age_level": level,
+    }
+
+
 class OrdersService:
     def __init__(self) -> None:
         self.client = OzonClient()
+        self.client_wb = WbClient()
         self.logger = logging.getLogger(__name__)
+
+    def _has_existing_label_pdf(self, conn: sqlite3.Connection, order_id: int) -> bool:
+        row = conn.execute(
+            "SELECT label_pdf_path FROM orders WHERE id = ?",
+            (order_id,),
+        ).fetchone()
+        rel = (row["label_pdf_path"] or "").strip() if row else ""
+        if not rel:
+            return False
+        path = os.path.join(Config.BASE_DIR, rel.replace("/", os.sep))
+        return os.path.isfile(path)
+
+    def _fetch_and_attach_wb_labels(
+        self,
+        conn: sqlite3.Connection,
+        local_rows: List[sqlite3.Row],
+    ) -> None:
+        """Запросить stickers WB по orderId и сохранить путь в orders.wb_label_path."""
+        if not local_rows:
+            return
+        # local posting_number хранит WB orderId.
+        id_pairs: List[Tuple[int, int]] = []
+        for r in local_rows:
+            try:
+                local_id = int(r["id"])
+                wb_order_id = int(str(r["posting_number"] or "").strip())
+            except (TypeError, ValueError):
+                continue
+            id_pairs.append((local_id, wb_order_id))
+        if not id_pairs:
+            return
+        wb_ids = [p[1] for p in id_pairs]
+        for i in range(0, len(wb_ids), 100):
+            chunk = wb_ids[i : i + 100]
+            stickers = self.client_wb.get_order_stickers_png(chunk)
+            if not stickers:
+                continue
+            for local_id, wb_order_id in id_pairs:
+                png = stickers.get(wb_order_id)
+                if not png:
+                    continue
+                path = save_cached_wb_label(wb_order_id, png)
+                rel = os.path.relpath(path, Config.BASE_DIR).replace(os.sep, "/")
+                conn.execute(
+                    "UPDATE orders SET wb_label_path = ? WHERE id = ?",
+                    (rel, local_id),
+                )
 
     @staticmethod
     def _build_products_expanded_by_unit(
@@ -445,7 +548,12 @@ class OrdersService:
         to: Optional[str] = None,
         limit: int = 100,
         max_records: int = 5000,
+        progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, int]:
+        def _p(ev: Dict[str, Any]) -> None:
+            if progress_cb:
+                progress_cb(ev)
+
         # Ozon FBS имеет несколько последовательных статусов.
         # Чтобы локальные статусы не "застревали" (ожидает отгрузки -> доставляется),
         # синхронизируем сразу все 3 нужных статуса и затем очищаем базу от posting,
@@ -473,8 +581,10 @@ class OrdersService:
         hit_cap = False
 
         batch_size_base = max(1, min(limit, 1000))
+        _p({"step": "ozon_start", "statuses": statuses_to_fetch})
         for st in statuses_to_fetch:
             offset = 0
+            _p({"step": "ozon_status_start", "status": st})
             while True:
                 remaining = max_records - len(postings)
                 if remaining <= 0:
@@ -495,6 +605,16 @@ class OrdersService:
 
                 filtered_page = [p for p in page if p.get("status") not in EXCLUDED_STATUSES]
                 postings.extend(filtered_page)
+                _p(
+                    {
+                        "step": "ozon_status_page",
+                        "status": st,
+                        "offset": offset,
+                        "batch": len(page),
+                        "kept": len(filtered_page),
+                        "total": len(postings),
+                    }
+                )
 
                 if len(page) < batch_size:
                     break
@@ -503,6 +623,7 @@ class OrdersService:
 
             if hit_cap:
                 break
+            _p({"step": "ozon_status_done", "status": st, "total": len(postings)})
 
         sku_values: List[int] = []
         for posting in postings:
@@ -517,6 +638,7 @@ class OrdersService:
 
         image_map: Dict[str, str] = {}
         unique_skus = sorted(set(sku_values))
+        _p({"step": "ozon_skus", "count": len(unique_skus)})
         chunk_size = 100
         for i in range(0, len(unique_skus), chunk_size):
             chunk = unique_skus[i : i + chunk_size]
@@ -591,6 +713,8 @@ class OrdersService:
                     updated += 1
                 else:
                     created += 1
+                if (created + updated) % 40 == 0:
+                    _p({"step": "ozon_db_save", "current": created + updated, "total": len(postings)})
             # Cleanup: delete orders which are not present on Ozon anymore (within the same sync window),
             # but only for the 3 statuses we actually keep history for.
             deleted = 0
@@ -632,6 +756,7 @@ class OrdersService:
         finally:
             conn.close()
 
+        _p({"step": "ozon_done", "created": created, "updated": updated, "total": len(postings), "deleted": deleted})
         self.logger.info("Синхронизация заказов завершена: created=%s updated=%s", created, updated)
         return {
             "created": created,
@@ -932,7 +1057,8 @@ class OrdersService:
                 posting_numbers.append(order["posting_number"])
                 existed, order_id = self._upsert_order(conn, order)
                 self._replace_order_items(conn, order_id, order["items"])
-                wb_ids_for_labels.append(order_id)
+                if str(order.get("status") or "") in ("new", "confirm"):
+                    wb_ids_for_labels.append(order_id)
                 if existed:
                     updated += 1
                 else:
@@ -980,12 +1106,33 @@ class OrdersService:
                     (str(nid),),
                 )
 
+            # Подтягиваем WB stickers для заказов "На сборке" (confirm), где их ещё нет.
+            try:
+                wb_confirm_rows = conn.execute(
+                    """
+                    SELECT id, posting_number
+                    FROM orders
+                    WHERE marketplace = 'wb'
+                      AND status = 'confirm'
+                      AND (wb_label_path IS NULL OR TRIM(wb_label_path) = '')
+                    ORDER BY updated_at DESC
+                    LIMIT 300
+                    """
+                ).fetchall()
+                if wb_confirm_rows:
+                    self._fetch_and_attach_wb_labels(conn, wb_confirm_rows)
+            except Exception:
+                self.logger.exception("Не удалось подтянуть WB stickers для заказов на сборке")
+
             conn.commit()
 
-            if Config.WB_SYNC_BUILD_LABEL_PDF and wb_ids_for_labels:
-                n_lab = len(wb_ids_for_labels)
+            if wb_ids_for_labels:
+                to_build: List[int] = [oid for oid in wb_ids_for_labels if not self._has_existing_label_pdf(conn, oid)]
+                n_lab = len(to_build)
+                if n_lab == 0:
+                    to_build = []
                 _p({"step": "wb_labels_start", "total": n_lab})
-                for li, order_id in enumerate(wb_ids_for_labels, start=1):
+                for li, order_id in enumerate(to_build, start=1):
                     self._sync_order_label_pdf(conn, order_id, fetch_ozon_for_size=False)
                     conn.commit()
                     if n_lab and (li == 1 or li % 40 == 0 or li == n_lab):
@@ -1732,6 +1879,7 @@ class OrdersService:
                     o.*,
                     COALESCE(SUM(oi.quantity), 0) as total_qty,
                     s.name AS shipment_name,
+                    s.wb_supply_id AS shipment_wb_supply_id,
                     COALESCE(sc.orders_count, 0) AS shipment_orders_count
                 FROM orders o
                 LEFT JOIN order_items oi ON oi.order_id = o.id
@@ -1822,6 +1970,25 @@ class OrdersService:
                 ]
 
             orders = [dict(r) for r in rows]
+            wb_supply_name_map: Dict[str, str] = {}
+            if marketplace == "wb":
+                supply_ids = set()
+                for order in orders:
+                    raw = order.get("raw_json")
+                    if not raw:
+                        continue
+                    try:
+                        payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                    except Exception:
+                        payload = {}
+                    sid = str((payload or {}).get("supplyId") or "").strip()
+                    if sid:
+                        supply_ids.add(sid)
+                if supply_ids:
+                    try:
+                        wb_supply_name_map = self.get_wb_supply_name_map()
+                    except Exception:
+                        self.logger.exception("Не удалось получить список поставок WB для названий")
             for order in orders:
                 items = conn.execute(
                     "SELECT * FROM order_items WHERE order_id = ?",
@@ -1845,13 +2012,40 @@ class OrdersService:
                     order["status_label"] = STATUS_LABELS.get(
                         order.get("status"), order.get("status") or "-"
                     )
+                if marketplace == "wb":
+                    raw = order.get("raw_json")
+                    sid = ""
+                    if raw:
+                        try:
+                            payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                        except Exception:
+                            payload = {}
+                        sid = str((payload or {}).get("supplyId") or "").strip()
+                    if not sid:
+                        sid = str(order.get("shipment_wb_supply_id") or "").strip()
+                    if not sid:
+                        local_name = str(order.get("shipment_name") or "").strip()
+                        if local_name.startswith("WB-GI-"):
+                            sid = local_name
+                    if sid:
+                        order["wb_supply_id"] = sid
+                        wb_name = (wb_supply_name_map.get(sid) or "").strip()
+                        cur_name = str(order.get("shipment_name") or "").strip()
+                        if wb_name:
+                            order["shipment_name"] = wb_name
+                        elif not cur_name:
+                            order["shipment_name"] = sid
                 order["created_at_display"] = _format_ru_short_datetime(order.get("created_at"))
                 order["shipment_date_display"] = _format_ru_short_datetime(order.get("shipment_date"))
-                tinfo = parse_shipment_tariff_from_raw(order.get("raw_json"))
+                if marketplace == "wb":
+                    tinfo = _wb_elapsed_tariff(order.get("created_at"))
+                else:
+                    tinfo = parse_shipment_tariff_from_raw(order.get("raw_json"))
                 order["tariff_label"] = tinfo["label"]
                 order["tariff_hint"] = tinfo["hint"]
                 order["tariff_segment_active"] = tinfo["segment_active"]
                 order["tariff_segment_count"] = tinfo["segment_count"]
+                order["tariff_age_level"] = tinfo.get("age_level", "")
 
             return {
                 "orders": orders,
@@ -1865,8 +2059,10 @@ class OrdersService:
         finally:
             conn.close()
 
-    def suggest_next_shipment_name(self, on_day: Optional[date] = None) -> str:
-        prefix = _shipment_date_prefix(on_day)
+    def suggest_next_shipment_name(
+        self, on_day: Optional[date] = None, marketplace: str = "ozon"
+    ) -> str:
+        prefix = _shipment_date_prefix(on_day, marketplace=marketplace)
         conn = get_db_connection()
         try:
             max_n = 0
@@ -1907,6 +2103,109 @@ class OrdersService:
                 ["awaiting_deliver", marketplace],
             ).fetchall()
             return [{"id": int(r["id"]), "name": r["name"]} for r in rows]
+        finally:
+            conn.close()
+
+    def get_wb_supplies_available(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Активные поставки WB из API (для «Добавить в существующую»)."""
+        out: List[Dict[str, Any]] = []
+        next_cursor = 0
+        page_limit = min(max(int(limit), 1), 1000)
+        while len(out) < limit:
+            page = self.client_wb.get_supplies_page(limit=page_limit, next_cursor=next_cursor)
+            supplies = list(page.get("supplies") or [])
+            if not supplies:
+                break
+            for s in supplies:
+                sid = str(s.get("id") or "").strip()
+                if not sid:
+                    continue
+                if bool(s.get("done")):
+                    continue
+                out.append({"id": sid, "name": str(s.get("name") or sid)})
+                if len(out) >= limit:
+                    break
+            nxt = page.get("next")
+            if nxt is None:
+                break
+            try:
+                next_cursor = int(nxt)
+            except (TypeError, ValueError):
+                break
+            if next_cursor <= 0:
+                break
+        return out
+
+    def get_wb_supply_name_map(self, limit: int = 2000) -> Dict[str, str]:
+        """Карта supplyId -> name из WB API (для отображения названий поставок у заказов)."""
+        out: Dict[str, str] = {}
+        next_cursor = 0
+        page_limit = 1000
+        while len(out) < limit:
+            page = self.client_wb.get_supplies_page(limit=page_limit, next_cursor=next_cursor)
+            supplies = list(page.get("supplies") or [])
+            if not supplies:
+                break
+            for s in supplies:
+                sid = str(s.get("id") or "").strip()
+                if not sid:
+                    continue
+                out[sid] = str(s.get("name") or sid)
+                if len(out) >= limit:
+                    break
+            nxt = page.get("next")
+            if nxt is None:
+                break
+            try:
+                next_cursor = int(nxt)
+            except (TypeError, ValueError):
+                break
+            if next_cursor <= 0:
+                break
+        return out
+
+    def get_wb_supplies_with_orders(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """Список WB поставок с количеством заказов (как чипы над статусами)."""
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT o.raw_json, s.wb_supply_id AS local_supply_id
+                FROM orders o
+                LEFT JOIN shipments s ON s.id = o.shipment_id
+                WHERE o.marketplace = 'wb'
+                  AND o.status = 'confirm'
+                ORDER BY o.created_at DESC
+                """
+            ).fetchall()
+            counts: Dict[str, int] = {}
+            for r in rows:
+                raw = r["raw_json"]
+                sid = ""
+                if raw:
+                    try:
+                        payload = json.loads(raw)
+                    except Exception:
+                        payload = {}
+                    sid = str((payload or {}).get("supplyId") or "").strip()
+                if not sid:
+                    sid = str(r["local_supply_id"] or "").strip()
+                if not sid:
+                    continue
+                counts[sid] = counts.get(sid, 0) + 1
+            if not counts:
+                return []
+            name_map: Dict[str, str] = {}
+            try:
+                name_map = self.get_wb_supply_name_map(limit=5000)
+            except Exception:
+                self.logger.exception("Не удалось получить имена WB поставок для чипов")
+            items = [
+                {"id": sid, "name": (name_map.get(sid) or sid), "orders_count": int(cnt)}
+                for sid, cnt in counts.items()
+            ]
+            items.sort(key=lambda x: x["orders_count"], reverse=True)
+            return items[: max(1, int(limit))]
         finally:
             conn.close()
 
@@ -1999,13 +2298,83 @@ class OrdersService:
                 )
                 order["created_at_display"] = _format_ru_short_datetime(order.get("created_at"))
                 order["shipment_date_display"] = _format_ru_short_datetime(order.get("shipment_date"))
+                tinfo = _wb_elapsed_tariff(order.get("created_at"))
+                order["tariff_label"] = tinfo["label"]
+                order["tariff_hint"] = tinfo["hint"]
+                order["tariff_segment_active"] = tinfo["segment_active"]
+                order["tariff_segment_count"] = tinfo["segment_count"]
+                order["tariff_age_level"] = tinfo.get("age_level", "")
+
+            return {"shipment": dict(ship), "orders": orders}
+        finally:
+            conn.close()
+
+    def get_wb_shipment_detail_by_supply_id(self, supply_id: str) -> Dict[str, Any]:
+        sid = (supply_id or "").strip()
+        if not sid:
+            return {"shipment": None, "orders": []}
+
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT o.*, s.wb_supply_id
+                FROM orders o
+                LEFT JOIN shipments s ON s.id = o.shipment_id
+                WHERE o.marketplace = 'wb'
+                ORDER BY o.created_at DESC
+                """
+            ).fetchall()
+            matched: List[Dict[str, Any]] = []
+            for row in rows:
+                raw = row["raw_json"]
+                if not raw:
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    continue
+                sid_order = str((payload or {}).get("supplyId") or "").strip()
+                if not sid_order:
+                    sid_order = str(row["wb_supply_id"] if "wb_supply_id" in row.keys() else "").strip()
+                if sid_order != sid:
+                    continue
+                order = dict(row)
+                items = conn.execute(
+                    "SELECT * FROM order_items WHERE order_id = ?",
+                    (order["id"],),
+                ).fetchall()
+                order["items"] = [dict(i) for i in items]
+                order["unit_count"] = sum(int(i.get("quantity") or 0) for i in order["items"])
+                order["has_multi_unit"] = order["unit_count"] > 1
+                order["wb_supply_id"] = sid
+                order["status_label"] = WB_STATUS_LABELS.get(order.get("status"), order.get("status") or "-")
+                order["created_at_display"] = _format_ru_short_datetime(order.get("created_at"))
+                order["shipment_date_display"] = _format_ru_short_datetime(order.get("shipment_date"))
                 tinfo = parse_shipment_tariff_from_raw(order.get("raw_json"))
                 order["tariff_label"] = tinfo["label"]
                 order["tariff_hint"] = tinfo["hint"]
                 order["tariff_segment_active"] = tinfo["segment_active"]
                 order["tariff_segment_count"] = tinfo["segment_count"]
+                matched.append(order)
 
-            return {"shipment": dict(ship), "orders": orders}
+            ship_name = sid
+            try:
+                details = self.client_wb.get_supply_details(sid)
+                ship_name = str(details.get("name") or sid)
+            except Exception:
+                m = self.get_wb_supply_name_map(limit=5000)
+                ship_name = str(m.get(sid) or sid)
+
+            return {
+                "shipment": {
+                    "id": sid,
+                    "name": ship_name,
+                    "marketplace": "wb",
+                    "wb_supply_id": sid,
+                },
+                "orders": matched,
+            }
         finally:
             conn.close()
 
@@ -2153,6 +2522,8 @@ class OrdersService:
         marketplace: str = "ozon",
         ship_after: bool = False,
     ) -> Dict[str, Any]:
+        if marketplace == "wb":
+            return self.create_wb_shipment_with_orders(name=name, order_ids=order_ids)
         clean = (name or "").strip()
         if not clean:
             return {"ok": False, "error": "Укажите название поставки"}
@@ -2333,6 +2704,153 @@ class OrdersService:
         finally:
             conn.close()
 
+    def create_wb_shipment_with_orders(self, name: str, order_ids: List[int]) -> Dict[str, Any]:
+        clean = (name or "").strip()
+        if not clean:
+            return {"ok": False, "error": "Укажите название поставки"}
+        ids = sorted({int(i) for i in order_ids if i is not None})
+        if not ids:
+            return {"ok": False, "error": "Не выбрано ни одного заказа"}
+
+        conn = get_db_connection()
+        try:
+            ph = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"""
+                SELECT id, posting_number
+                FROM orders
+                WHERE id IN ({ph}) AND marketplace = 'wb' AND status = 'new'
+                """,
+                ids,
+            ).fetchall()
+            if len(rows) != len(ids):
+                return {"ok": False, "error": "Для WB можно выбрать только заказы со статусом «Новые»"}
+
+            wb_order_ids: List[int] = []
+            for r in rows:
+                try:
+                    wb_order_ids.append(int(str(r["posting_number"] or "").strip()))
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": f"Некорректный WB id у заказа {r['id']}"}
+
+            wb_supply_id = self.client_wb.create_supply(clean)
+            self.client_wb.add_orders_to_supply(wb_supply_id, wb_order_ids)
+
+            now = datetime.utcnow().isoformat()
+            cur = conn.execute(
+                "INSERT INTO shipments (name, marketplace, created_at, wb_supply_id) VALUES (?, 'wb', ?, ?)",
+                (clean, now, wb_supply_id),
+            )
+            shipment_id = int(cur.lastrowid)
+            conn.execute(
+                f"UPDATE orders SET shipment_id = ?, status = 'confirm', updated_at = ? WHERE id IN ({ph})",
+                [shipment_id, now, *ids],
+            )
+            for local_id in ids:
+                if self._has_existing_label_pdf(conn, int(local_id)):
+                    continue
+                try:
+                    self._sync_order_label_pdf(conn, int(local_id), fetch_ozon_for_size=False)
+                except Exception:
+                    self.logger.exception("Не удалось собрать ШК PDF для WB order_id=%s", local_id)
+            try:
+                self._fetch_and_attach_wb_labels(conn, rows)
+            except Exception:
+                self.logger.exception("Не удалось получить WB-этикетки после создания поставки")
+            conn.commit()
+            return {
+                "ok": True,
+                "shipment_id": shipment_id,
+                "name": clean,
+                "wb_supply_id": wb_supply_id,
+                "count": len(ids),
+                "requested_count": len(ids),
+            }
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return {"ok": False, "error": "Поставка с таким названием уже существует"}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def add_orders_to_existing_wb_supply(self, supply_id: str, order_ids: List[int]) -> Dict[str, Any]:
+        sid = (supply_id or "").strip()
+        if not sid:
+            return {"ok": False, "error": "Не выбрана поставка WB"}
+        ids = sorted({int(i) for i in order_ids if i is not None})
+        if not ids:
+            return {"ok": False, "error": "Не выбрано ни одного заказа"}
+
+        conn = get_db_connection()
+        try:
+            ph = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"""
+                SELECT id, posting_number
+                FROM orders
+                WHERE id IN ({ph}) AND marketplace = 'wb' AND status = 'new'
+                """,
+                ids,
+            ).fetchall()
+            if len(rows) != len(ids):
+                return {"ok": False, "error": "Для WB можно выбрать только заказы со статусом «Новые»"}
+            wb_order_ids: List[int] = []
+            for r in rows:
+                try:
+                    wb_order_ids.append(int(str(r["posting_number"] or "").strip()))
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": f"Некорректный WB id у заказа {r['id']}"}
+
+            self.client_wb.add_orders_to_supply(sid, wb_order_ids)
+
+            now = datetime.utcnow().isoformat()
+            srow = conn.execute(
+                "SELECT id, name FROM shipments WHERE marketplace='wb' AND wb_supply_id = ?",
+                (sid,),
+            ).fetchone()
+            if srow:
+                shipment_id = int(srow["id"])
+                shipment_name = str(srow["name"] or sid)
+            else:
+                shipment_name = sid
+                cur = conn.execute(
+                    "INSERT INTO shipments (name, marketplace, created_at, wb_supply_id) VALUES (?, 'wb', ?, ?)",
+                    (shipment_name, now, sid),
+                )
+                shipment_id = int(cur.lastrowid)
+
+            conn.execute(
+                f"UPDATE orders SET shipment_id = ?, status = 'confirm', updated_at = ? WHERE id IN ({ph})",
+                [shipment_id, now, *ids],
+            )
+            for local_id in ids:
+                if self._has_existing_label_pdf(conn, int(local_id)):
+                    continue
+                try:
+                    self._sync_order_label_pdf(conn, int(local_id), fetch_ozon_for_size=False)
+                except Exception:
+                    self.logger.exception("Не удалось собрать ШК PDF для WB order_id=%s", local_id)
+            try:
+                self._fetch_and_attach_wb_labels(conn, rows)
+            except Exception:
+                self.logger.exception("Не удалось получить WB-этикетки после добавления в поставку")
+            conn.commit()
+            return {
+                "ok": True,
+                "shipment_id": shipment_id,
+                "shipment_name": shipment_name,
+                "wb_supply_id": sid,
+                "count": len(ids),
+                "requested_count": len(ids),
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def attach_split_children_to_shipment(
         self,
         shipment_id: int,
@@ -2402,6 +2920,25 @@ class OrdersService:
                 "SELECT status, COUNT(*) as cnt FROM orders WHERE marketplace = 'ozon' GROUP BY status"
             ).fetchall()
             by_status = {row["status"] or "unknown": row["cnt"] for row in grouped}
+            wb_total = conn.execute(
+                "SELECT COUNT(*) as cnt FROM orders WHERE marketplace = 'wb'"
+            ).fetchone()["cnt"]
+            wb_grouped = conn.execute(
+                "SELECT status, COUNT(*) as cnt FROM orders WHERE marketplace = 'wb' GROUP BY status"
+            ).fetchall()
+            wb_raw = {row["status"] or "unknown": int(row["cnt"]) for row in wb_grouped}
+            wb_new_feed = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM orders
+                WHERE marketplace = 'wb' AND status = 'new' AND COALESCE(wb_in_new_feed, 0) = 1
+                """
+            ).fetchone()["cnt"]
+            wb_by_status = {
+                # "Новые" на главной должны совпадать с вкладкой "Новые" в orders_wb.
+                "new": int(wb_new_feed),
+                "confirm": int(wb_raw.get("confirm", 0)),
+                "in_delivery": int(wb_raw.get("complete", 0)) + int(wb_raw.get("wbgo", 0)),
+            }
 
             recent = conn.execute(
                 """
@@ -2414,6 +2951,12 @@ class OrdersService:
                 LIMIT 10
                 """
             ).fetchall()
-            return {"total": total, "by_status": by_status, "recent": [dict(r) for r in recent]}
+            return {
+                "total": total,
+                "by_status": by_status,
+                "recent": [dict(r) for r in recent],
+                "wb_total": int(wb_total),
+                "wb_by_status": wb_by_status,
+            }
         finally:
             conn.close()

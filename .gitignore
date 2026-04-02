@@ -11,6 +11,7 @@ instance/*.lock
 instance/*.json
 instance/labels/
 instance/ozon_labels_cache/
+instance/wb_labels_cache/
 instance/wb_label_template.pdf
 lenta_zakazov*.pdf
 Unknown98.pdf

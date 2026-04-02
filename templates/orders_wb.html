@@ -4,7 +4,10 @@
   <div
     class="orders-page"
     data-orders-page
+    data-marketplace="wb"
     data-load-more-url="{{ url_for('orders_wb_load_more') }}"
+    data-shipment-next-name-url="{{ url_for('orders_wb_shipment_next_name') }}"
+    data-shipment-available-url="{{ url_for('orders_wb_shipment_available') }}"
     data-filter-status="{{ filters.status }}"
     data-filter-date-from="{{ filters.date_from }}"
     data-filter-date-to="{{ filters.date_to }}"
@@ -24,6 +27,17 @@
       </button>
     </form>
   </section>
+
+  {% if top_shipments %}
+    <div class="shipments-toolbar" aria-label="Существующие поставки WB">
+      {% for s in top_shipments %}
+        <a class="shipment-chip" href="{{ url_for('wb_shipment_detail', supply_id=s.id) }}">
+          <span>{{ s.name }}</span>
+          <span class="shipment-chip-count">{{ s.orders_count }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% endif %}
 
   <div class="status-toolbar">
     <div class="status-tabs" aria-label="Фильтр по статусу WB">
@@ -100,7 +114,16 @@
   <table class="orders-table">
     <thead>
       <tr>
-        <th class="col-check" aria-hidden="true"></th>
+        <th class="col-check">
+          <input
+            type="checkbox"
+            id="select-all-orders"
+            class="order-cb-master"
+            title="Выбрать все на странице"
+            aria-label="Выбрать все на странице"
+            {% if filters.status in ['confirm', 'in_delivery'] %}disabled{% endif %}
+          />
+        </th>
         <th>ID</th>
         <th>Поставка</th>
         <th class="col-status">Статус</th>
@@ -112,7 +135,7 @@
         <th>Штрихкод</th>
         <th>Размер</th>
         <th class="col-label-pdf" title="Этикетка PDF">ШК</th>
-        <th class="col-label-pdf" title="Этикетка Ozon">Ozon</th>
+        <th class="col-label-pdf" title="Этикетка WB">WB</th>
       </tr>
     </thead>
     <tbody id="orders-tbody">
@@ -133,5 +156,69 @@
       <button type="button" class="btn-load-more" id="btn-load-more">Показать еще</button>
     </div>
   {% endif %}
+
+  <div id="orders-bulk-bar" class="bulk-bar bulk-bar--hidden" aria-hidden="true">
+    <div class="bulk-bar-inner">
+      <div class="bulk-bar-left">
+        <span class="bulk-count" id="bulk-selected-label"></span>
+        <button type="button" class="link-btn" id="bulk-select-page">Выбрать все на странице</button>
+        <button type="button" class="link-btn" id="bulk-clear">Сбросить</button>
+      </div>
+      <div class="bulk-bar-right">
+        <form method="post" action="{{ url_for('orders_wb_shipment_create') }}" id="shipment-create-form" class="shipment-create-form">
+          <input type="hidden" name="next" value="{{ request.full_path }}" />
+          <input type="hidden" name="shipment_name" id="shipment-name-field" value="" />
+          <div id="shipment-order-inputs"></div>
+          <button type="button" class="btn btn-bulk-primary" id="shipment-open-btn">+ Новая поставка</button>
+        </form>
+
+        <form method="post" action="{{ url_for('orders_wb_shipment_add_existing') }}" id="shipment-add-form" class="shipment-add-form">
+          <input type="hidden" name="next" value="{{ request.full_path }}" />
+          <input type="hidden" name="shipment_id" id="shipment-existing-id-field" value="" />
+          <div id="shipment-order-inputs-add"></div>
+        </form>
+        <button type="button" class="btn btn-bulk-secondary" id="shipment-add-open-btn">Добавить в существующую</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="shipment-modal" class="modal-overlay modal-overlay--hidden" role="dialog" aria-modal="true" aria-labelledby="shipment-modal-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog--shipment">
+      <button type="button" class="modal-close" id="shipment-modal-x" aria-label="Закрыть">×</button>
+      <h2 id="shipment-modal-title" class="modal-title-shipment">Новая поставка WB</h2>
+      <p class="modal-subtitle-shipment">В неё попадут выбранные заказы WB (Новые)</p>
+      <label class="shipment-name-label" for="shipment-name-input">Название поставки</label>
+      <input type="text" id="shipment-name-input" class="shipment-name-input" autocomplete="off" />
+      <div class="modal-actions modal-actions-shipment">
+        <button type="button" class="btn btn-shipment-create" id="shipment-modal-create">Создать и добавить</button>
+        <button type="button" class="btn btn-shipment-close" id="shipment-modal-close">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="shipment-existing-modal" class="modal-overlay modal-overlay--hidden" role="dialog" aria-modal="true" aria-labelledby="shipment-existing-modal-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog--shipment">
+      <button type="button" class="modal-close" id="shipment-existing-modal-x" aria-label="Закрыть">×</button>
+      <h2 id="shipment-existing-modal-title" class="modal-title-shipment">Добавить в существующую поставку WB</h2>
+      <p class="modal-subtitle-shipment">В неё попадут выбранные заказы WB (Новые)</p>
+      <label class="shipment-name-label" for="shipment-existing-select">Поставка WB</label>
+      <select id="shipment-existing-select" class="shipment-name-input"></select>
+      <div class="modal-actions modal-actions-shipment">
+        <button type="button" class="btn btn-shipment-create" id="shipment-existing-modal-add-btn">Добавить</button>
+        <button type="button" class="btn btn-shipment-close" id="shipment-existing-modal-close">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="shipment-progress-modal" class="modal-overlay modal-overlay--hidden" role="dialog" aria-modal="true" aria-labelledby="shipment-progress-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog--shipment">
+      <h2 id="shipment-progress-title" class="modal-title-shipment">Обработка заказов WB</h2>
+      <p class="modal-subtitle-shipment" id="shipment-progress-stage">Подготовка...</p>
+      <div class="shipment-progress-list" id="shipment-progress-list"></div>
+      <div class="modal-actions modal-actions-shipment modal-actions-progress">
+        <button type="button" class="btn btn-shipment-close" id="shipment-progress-close" disabled>Закрыть</button>
+      </div>
+    </div>
+  </div>
   </div>
 {% endblock %}

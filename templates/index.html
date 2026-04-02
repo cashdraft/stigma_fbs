@@ -31,7 +31,7 @@
       <input type="hidden" name="sync_scope" value="all" />
       <button type="submit" class="card--sync-ozon-home-btn" id="home-sync-ozon-btn">
         <span class="card--sync-ozon-home-title">Синхронизация с Ozon</span>
-        <span class="card--sync-ozon-home-sub">Обновить все заказы (3 статуса)</span>
+        <span class="card--sync-ozon-home-sub">Обновить все заказы</span>
       </button>
     </form>
 
@@ -56,6 +56,63 @@
     <a class="card card--link card--stat card--stat-all" href="{{ url_for('orders', status='all') }}">
       <span class="card--stat-label">Все</span>
       <strong class="card--stat-value">{{ summary.total }}</strong>
+    </a>
+  </section>
+
+  <section class="cards cards--home cards--home-wb" aria-label="Сводка и действия WB">
+    <a
+      class="card card--link card--ozon-home card--wb-home"
+      href="{{ url_for('orders_wb', status='all') }}"
+      aria-label="Заказы WB, все статусы"
+    >
+      <img
+        class="card--ozon-home-logo card--wb-home-logo"
+        src="{{ url_for('logo_wb_png') }}"
+        alt=""
+        width="88"
+        height="88"
+        loading="lazy"
+        decoding="async"
+      />
+    </a>
+
+    <form
+      method="post"
+      action="{{ url_for('update_orders_wb') }}"
+      class="card card--sync-ozon-home card--sync-wb-home"
+      id="home-sync-wb-form"
+    >
+      <input type="hidden" name="status" value="new" />
+      <input type="hidden" name="since" value="" />
+      <input type="hidden" name="to" value="" />
+      <input type="hidden" name="limit" value="100" />
+      <button type="submit" class="card--sync-ozon-home-btn" id="home-sync-wb-btn">
+        <span class="card--sync-ozon-home-title">Синхронизация с WB</span>
+        <span class="card--sync-ozon-home-sub">Обновить заказы WB</span>
+      </button>
+    </form>
+
+    <a
+      class="card card--link card--stat card--stat-awaiting_packaging"
+      href="{{ url_for('orders_wb', status='new') }}"
+    >
+      <span class="card--stat-label">Новые</span>
+      <strong class="card--stat-value">{{ summary.wb_by_status.get('new', 0) }}</strong>
+    </a>
+    <a
+      class="card card--link card--stat card--stat-awaiting_deliver"
+      href="{{ url_for('orders_wb', status='confirm') }}"
+    >
+      <span class="card--stat-label">На сборке</span>
+      <strong class="card--stat-value">{{ summary.wb_by_status.get('confirm', 0) }}</strong>
+    </a>
+    <a class="card card--link card--stat card--stat-delivering" href="{{ url_for('orders_wb', status='in_delivery') }}">
+      <span class="card--stat-label">В доставке</span>
+      <strong class="card--stat-value">{{ summary.wb_by_status.get('in_delivery', 0) }}</strong>
+    </a>
+    <a class="card card--link card--stat card--stat-all" href="{{ url_for('orders_wb', status='all') }}">
+      <span class="card--stat-label">Все</span>
+      <strong class="card--stat-value">{{ summary.wb_total }}</strong>
     </a>
   </section>
 {% endblock %}

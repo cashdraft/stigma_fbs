@@ -4,7 +4,10 @@
   <div
     class="orders-page"
     data-orders-page
+    data-marketplace="ozon"
     data-load-more-url="{{ url_for('orders_load_more') }}"
+    data-shipment-next-name-url="{{ url_for('orders_shipment_next_name') }}"
+    data-shipment-available-url="{{ url_for('orders_shipment_available') }}"
     data-filter-status="{{ filters.status }}"
     data-filter-date-from="{{ filters.date_from }}"
     data-filter-date-to="{{ filters.date_to }}"

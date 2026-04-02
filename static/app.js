@@ -160,9 +160,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const updateOzonProgressClose = document.getElementById("update-ozon-progress-close");
   let updateOzonInFlight = false;
   let updateOzonAbortController = null;
+  let updateOzonReloadOnClose = false;
 
   function openUpdateOzonModal() {
     if (!updateOzonProgressModal) return;
+    updateOzonReloadOnClose = false;
     updateOzonProgressModal.classList.remove("modal-overlay--hidden");
     updateOzonProgressModal.setAttribute("aria-hidden", "false");
     document.body.style.overflow = "hidden";
@@ -195,6 +197,10 @@ document.addEventListener("DOMContentLoaded", () => {
       try {
         updateOzonAbortController.abort();
       } catch (_) {}
+      return;
+    }
+    if (updateOzonReloadOnClose) {
+      window.location.reload();
       return;
     }
     closeUpdateOzonModal();
@@ -232,28 +238,64 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     const startedAt = Date.now();
+    let lastProgressEv = null;
     const tick = setInterval(() => {
       const sec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-      setUpdateOzonStage(`Запрос в Ozon отправлен (${scopeLabel}). Прошло: ${sec} сек...`, "progress");
-    }, 1000);
+      setUpdateOzonStage(ozonSyncProgressText(lastProgressEv, sec, scopeLabel), "progress");
+    }, 400);
 
     const formData = new FormData(form);
     updateOzonAbortController = new AbortController();
     updateOzonInFlight = true;
 
     try {
-      const res = await fetch("/orders/update-json", {
+      const res = await fetch("/orders/update-stream", {
         method: "POST",
         body: formData,
         signal: updateOzonAbortController.signal,
       });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        throw new Error((data && data.message) || `Ошибка ${res.status}`);
+      if (!res.ok) {
+        let msg = `Ошибка ${res.status}`;
+        try {
+          const errJson = await res.json();
+          if (errJson && errJson.message) msg = errJson.message;
+        } catch (_) {}
+        throw new Error(msg);
       }
+      const reader = res.body && res.body.getReader ? res.body.getReader() : null;
+      if (!reader) throw new Error("Браузер не поддерживает потоковый ответ");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let result = null;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (let i = 0; i < lines.length; i += 1) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          let obj;
+          try {
+            obj = JSON.parse(line);
+          } catch (_) {
+            continue;
+          }
+          if (obj.type === "progress") {
+            lastProgressEv = obj;
+            const sec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+            setUpdateOzonStage(ozonSyncProgressText(obj, sec, scopeLabel), "progress");
+          } else if (obj.type === "done") {
+            result = obj.result || {};
+          } else if (obj.type === "error") {
+            throw new Error((obj && obj.message) || "Ошибка синхронизации");
+          }
+        }
+      }
+      if (result == null) throw new Error("Соединение оборвалось до завершения синхронизации");
       clearInterval(tick);
       const sec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-      const result = (data && data.result) || {};
       const total = Number(result.total || 0);
       const created = Number(result.created || 0);
       const updated = Number(result.updated || 0);
@@ -278,6 +320,7 @@ document.addEventListener("DOMContentLoaded", () => {
       clearInterval(tick);
       updateOzonInFlight = false;
       updateOzonAbortController = null;
+      updateOzonReloadOnClose = true;
       els.forEach((el) => {
         el.disabled = false;
       });
@@ -285,14 +328,30 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  function ozonSyncProgressText(ev, sec, scopeLabel) {
+    const head = `Прошло: ${sec} сек`;
+    const step = ev && ev.step;
+    if (!step) return `Запрос в Ozon отправлен (${scopeLabel}).\n${head}`;
+    if (step === "ozon_start") return `${head}\nЗапрос в Ozon отправлен (${scopeLabel})`;
+    if (step === "ozon_status_start") return `${head}\nСтатус ${ev.status}: начинаем загрузку…`;
+    if (step === "ozon_status_page") return `${head}\n${ev.status}: offset ${ev.offset}, в ответе ${ev.batch}, учитываем ${ev.kept}, всего ${ev.total}`;
+    if (step === "ozon_status_done") return `${head}\n${ev.status}: готово, всего накоплено ${ev.total}`;
+    if (step === "ozon_skus") return `${head}\nПодтягиваем карточки/атрибуты по SKU: ${ev.count}`;
+    if (step === "ozon_db_save") return `${head}\nСохраняем в БД: ${ev.current}/${ev.total}`;
+    if (step === "ozon_done") return `${head}\nФинишируем…`;
+    return `${head}\nОбработка…`;
+  }
+
   const updateWbProgressModal = document.getElementById("update-wb-progress-modal");
   const updateWbProgressStage = document.getElementById("update-wb-progress-stage");
   const updateWbProgressClose = document.getElementById("update-wb-progress-close");
   let updateWbInFlight = false;
   let updateWbAbortController = null;
+  let updateWbReloadOnClose = false;
 
   function openUpdateWbModal() {
     if (!updateWbProgressModal) return;
+    updateWbReloadOnClose = false;
     updateWbProgressModal.classList.remove("modal-overlay--hidden");
     updateWbProgressModal.setAttribute("aria-hidden", "false");
     document.body.style.overflow = "hidden";
@@ -325,6 +384,10 @@ document.addEventListener("DOMContentLoaded", () => {
       try {
         updateWbAbortController.abort();
       } catch (_) {}
+      return;
+    }
+    if (updateWbReloadOnClose) {
+      window.location.reload();
       return;
     }
     closeUpdateWbModal();
@@ -416,6 +479,12 @@ document.addEventListener("DOMContentLoaded", () => {
       const bc = ev.batches_committed != null ? ev.batches_committed : 0;
       const cu = ev.cards_upserted != null ? ev.cards_upserted : 0;
       return `${head}\nОбход завершён: страниц ${pg}, пачек ${bc}, карточек записано: ${cu}\nСохранение служебных метаданных…`;
+    }
+    if (step === "wb_full_catalog_enrich_start") {
+      return `${head}\nКаталог сохранён. Обновляем строки заказов из wb_catalog.db…`;
+    }
+    if (step === "wb_full_catalog_enrich_done") {
+      return `${head}\nОбновление строк заказов завершено: ${ev.items_updated || 0}. Готовим итог…`;
     }
     return `${head}\nПодготовка…`;
   }
@@ -547,6 +616,7 @@ document.addEventListener("DOMContentLoaded", () => {
       clearInterval(tick);
       updateWbInFlight = false;
       updateWbAbortController = null;
+      updateWbReloadOnClose = true;
       els.forEach((el) => {
         el.disabled = false;
       });
@@ -667,6 +737,7 @@ document.addEventListener("DOMContentLoaded", () => {
       clearInterval(tick);
       updateWbInFlight = false;
       updateWbAbortController = null;
+      updateWbReloadOnClose = true;
       els.forEach((el) => {
         el.disabled = false;
       });
@@ -709,8 +780,19 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  const homeSyncWbForm = document.getElementById("home-sync-wb-form");
+  const homeSyncWbBtn = document.getElementById("home-sync-wb-btn");
+  if (homeSyncWbForm && homeSyncWbBtn && updateWbProgressModal && updateWbProgressStage && updateWbProgressClose) {
+    homeSyncWbForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      await runWbJsonSync(homeSyncWbForm, [homeSyncWbBtn]);
+    });
+  }
+
   const root = document.querySelector("[data-orders-page]");
   if (!root) return;
+  const marketplace = (root.dataset.marketplace || "ozon").toLowerCase();
+  const isWbPage = marketplace === "wb";
 
   const bar = document.getElementById("orders-bulk-bar");
   const tbody = document.getElementById("orders-tbody");
@@ -935,6 +1017,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let shipmentActionInFlight = false;
 
   function splitOrdersCount() {
+    if (isWbPage) return 0;
     return selected().filter((cb) => {
       const v = parseInt(cb.dataset.unitCount || "0", 10);
       return v > 1;
@@ -958,6 +1041,10 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function withSplitConfirm(actionFn) {
+    if (isWbPage) {
+      actionFn();
+      return;
+    }
     const n = splitOrdersCount();
     if (!n) {
       actionFn();
@@ -1057,7 +1144,9 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   async function submitShipmentActionAjax(formEl, progressTitle, hasSplit) {
-    const steps = hasSplit
+    const steps = isWbPage
+      ? ["Передаем выбранные заказы", "Добавляем в поставку WB", "Обновляем статусы: Новые -> На сборке"]
+      : hasSplit
       ? [
           "Передаем выбранные заказы",
           "Разбиваем на отправления и отгружаем в Ozon",
@@ -1073,7 +1162,15 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const timers = [
       setTimeout(() => setShipmentProgress(0, "done", "Передача выполнена"), 350),
-      setTimeout(() => setShipmentProgress(1, "active", hasSplit ? "Идет разбивка и отгрузка..." : "Идет отгрузка..."), 500),
+      setTimeout(
+        () =>
+          setShipmentProgress(
+            1,
+            "active",
+            isWbPage ? "Идет добавление в поставку WB..." : hasSplit ? "Идет разбивка и отгрузка..." : "Идет отгрузка...",
+          ),
+        500,
+      ),
       setTimeout(() => setShipmentProgress(2, "active", "Идет обновление заказов..."), 2200),
     ];
 
@@ -1202,7 +1299,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   async function fetchSuggestedShipmentName() {
-    const res = await fetch("/orders/shipment/next-name");
+    const u = root.dataset.shipmentNextNameUrl || "/orders/shipment/next-name";
+    const res = await fetch(u);
     if (!res.ok) throw new Error(String(res.status));
     const data = await res.json();
     return (data && data.name) || "";
@@ -1224,7 +1322,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   async function fetchAvailableShipmentsForAwaitingDeliver() {
-    const res = await fetch("/orders/shipment/available");
+    const u = root.dataset.shipmentAvailableUrl || "/orders/shipment/available";
+    const res = await fetch(u);
     if (!res.ok) throw new Error(String(res.status));
     const data = await res.json();
     return (data && data.shipments) || [];

@@ -4,7 +4,7 @@
   <section class="actions-row shipment-actions-row">
     <div class="shipment-actions-left">
       <h2 style="margin: 0;">Поставка: {{ shipment.name }}</h2>
-      <a class="btn btn-secondary btn-shipment-top" href="{{ url_for('orders') }}">
+      <a class="btn btn-secondary btn-shipment-top" href="{{ url_for('orders_wb', status='new') if shipment_is_wb else url_for('orders') }}">
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <line x1="19" y1="12" x2="5" y2="12"/>
           <polyline points="12 19 5 12 12 5"/>
@@ -15,7 +15,7 @@
     <div class="shipment-actions-right">
       <a
         class="btn btn-secondary btn-shipment-top"
-        href="{{ url_for('shipment_orders_tape_pdf', shipment_id=shipment.id) }}"
+        href="{{ url_for('wb_shipment_orders_tape_pdf', supply_id=shipment.wb_supply_id) if shipment_is_wb else url_for('shipment_orders_tape_pdf', shipment_id=shipment.id) }}"
         id="shipment-tape-download-btn"
       >
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -26,7 +26,10 @@
         </svg>
         <span>Лента заказов</span>
       </a>
-      <a class="btn btn-secondary btn-shipment-top" href="{{ url_for('shipment_picklist_xlsx', shipment_id=shipment.id) }}">
+      <a
+        class="btn btn-secondary btn-shipment-top"
+        href="{{ url_for('wb_shipment_picklist_xlsx', supply_id=shipment.wb_supply_id) if shipment_is_wb else url_for('shipment_picklist_xlsx', shipment_id=shipment.id) }}"
+      >
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M21 3H3v18h18V3z"/>
           <path d="M7 7h10"/>
@@ -57,7 +60,9 @@
         <th>Штрихкод</th>
         <th>Размер</th>
         <th class="col-label-pdf" title="Этикетка PDF">ШК</th>
-        <th class="col-label-pdf" title="Этикетка отправления Ozon">Ozon</th>
+        <th class="col-label-pdf" title="{{ 'Этикетка отправления WB' if shipment_is_wb else 'Этикетка отправления Ozon' }}">
+          {{ 'WB' if shipment_is_wb else 'Ozon' }}
+        </th>
       </tr>
     </thead>
     <tbody id="orders-tbody">

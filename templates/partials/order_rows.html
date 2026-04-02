@@ -6,7 +6,7 @@
   <tr class="order-item-row{% if not loop.first %} order-item-row--cont{% endif %}" data-order-id="{{ order.id }}">
     {% if loop.first %}
     <td class="col-check" rowspan="{{ rs }}">
-      {% if order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_packaging' %}
+      {% if (order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_packaging') or (order.marketplace|default('ozon') == 'wb' and order.status == 'new') %}
         <input
           type="checkbox"
           class="order-cb"
@@ -20,8 +20,12 @@
     </td>
     <td class="col-posting" rowspan="{{ rs }}">{{ order.posting_number or '-' }}</td>
     <td class="shipment-cell" rowspan="{{ rs }}">
-      {% if order.shipment_id and order.shipment_name %}
-        <a class="shipment-link" href="{{ url_for('shipment_detail', shipment_id=order.shipment_id) }}">
+      {% if order.marketplace|default('ozon') == 'wb' and order.wb_supply_id %}
+        <a class="shipment-link" href="{{ url_for('wb_shipment_detail', supply_id=order.wb_supply_id) }}">
+          {{ order.shipment_name or order.wb_supply_id }}
+        </a>
+      {% elif order.shipment_id and order.shipment_name %}
+        <a class="shipment-link" href="{{ url_for('shipment_detail', shipment_id=order.shipment_id, marketplace=order.marketplace|default('ozon')) }}">
           {{ order.shipment_name }}{% if order.shipment_orders_count %} - {{ order.shipment_orders_count }}{% endif %}
         </a>
       {% else %}
@@ -31,7 +35,7 @@
     <td class="col-status" rowspan="{{ rs }}"><span class="status status--{{ order.status or 'unknown' }}">{{ order.status_label }}</span></td>
     <td class="date-cell" rowspan="{{ rs }}">{{ order.created_at_display or '-' }}</td>
     <td class="tariff-cell" rowspan="{{ rs }}">
-      <div class="tariff-label">{{ order.tariff_label }}</div>
+      <div class="tariff-label{% if order.marketplace|default('ozon') == 'wb' and order.tariff_age_level %} tariff-age tariff-age--{{ order.tariff_age_level }}{% endif %}">{{ order.tariff_label }}</div>
       {% if order.tariff_segment_count and order.tariff_segment_count > 0 %}
         <div class="tariff-bar" role="presentation">
           {% for i in range(order.tariff_segment_count) %}
@@ -76,7 +80,15 @@
       {% endif %}
     </td>
     <td class="col-label-pdf" rowspan="{{ rs }}">
-      {% if order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_deliver' and order.posting_number %}
+      {% if order.marketplace|default('ozon') == 'wb' and order.wb_label_path %}
+        <a href="{{ url_for('order_wb_label_png', order_id=order.id) }}" class="label-pdf-link" title="Скачать этикетку WB" aria-label="Скачать этикетку WB для заказа {{ order.posting_number or order.id }}">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" x2="12" y1="15" y2="3" />
+          </svg>
+        </a>
+      {% elif order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_deliver' and order.posting_number %}
         <a href="{{ url_for('order_ozon_label_pdf', order_id=order.id) }}" class="label-pdf-link" title="Скачать этикетку отправления Ozon" aria-label="Скачать этикетку Ozon для заказа {{ order.posting_number or order.id }}">
           <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -94,7 +106,7 @@
   {% else %}
   <tr class="order-item-row" data-order-id="{{ order.id }}">
     <td class="col-check">
-    {% if order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_packaging' %}
+    {% if (order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_packaging') or (order.marketplace|default('ozon') == 'wb' and order.status == 'new') %}
       <input
         type="checkbox"
         class="order-cb"
@@ -108,8 +120,12 @@
     </td>
     <td class="col-posting">{{ order.posting_number or '-' }}</td>
     <td class="shipment-cell">
-      {% if order.shipment_id and order.shipment_name %}
-        <a class="shipment-link" href="{{ url_for('shipment_detail', shipment_id=order.shipment_id) }}">
+      {% if order.marketplace|default('ozon') == 'wb' and order.wb_supply_id %}
+        <a class="shipment-link" href="{{ url_for('wb_shipment_detail', supply_id=order.wb_supply_id) }}">
+          {{ order.shipment_name or order.wb_supply_id }}
+        </a>
+      {% elif order.shipment_id and order.shipment_name %}
+        <a class="shipment-link" href="{{ url_for('shipment_detail', shipment_id=order.shipment_id, marketplace=order.marketplace|default('ozon')) }}">
           {{ order.shipment_name }}{% if order.shipment_orders_count %} - {{ order.shipment_orders_count }}{% endif %}
         </a>
       {% else %}
@@ -119,7 +135,7 @@
     <td class="col-status"><span class="status status--{{ order.status or 'unknown' }}">{{ order.status_label }}</span></td>
     <td class="date-cell">{{ order.created_at_display or '-' }}</td>
     <td class="tariff-cell">
-      <div class="tariff-label">{{ order.tariff_label }}</div>
+      <div class="tariff-label{% if order.marketplace|default('ozon') == 'wb' and order.tariff_age_level %} tariff-age tariff-age--{{ order.tariff_age_level }}{% endif %}">{{ order.tariff_label }}</div>
       {% if order.tariff_segment_count and order.tariff_segment_count > 0 %}
         <div class="tariff-bar" role="presentation">
           {% for i in range(order.tariff_segment_count) %}
@@ -156,7 +172,15 @@
       {% endif %}
     </td>
     <td class="col-label-pdf">
-      {% if order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_deliver' and order.posting_number %}
+      {% if order.marketplace|default('ozon') == 'wb' and order.wb_label_path %}
+        <a href="{{ url_for('order_wb_label_png', order_id=order.id) }}" class="label-pdf-link" title="Скачать этикетку WB" aria-label="Скачать этикетку WB для заказа {{ order.posting_number or order.id }}">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" x2="12" y1="15" y2="3" />
+          </svg>
+        </a>
+      {% elif order.marketplace|default('ozon') == 'ozon' and order.status == 'awaiting_deliver' and order.posting_number %}
         <a href="{{ url_for('order_ozon_label_pdf', order_id=order.id) }}" class="label-pdf-link" title="Скачать этикетку отправления Ozon" aria-label="Скачать этикетку Ozon для заказа {{ order.posting_number or order.id }}">
           <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />

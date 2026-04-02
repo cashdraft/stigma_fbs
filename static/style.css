@@ -128,6 +128,10 @@ body.has-bulk-bar {
   align-items: stretch;
 }
 
+.cards--home + .cards--home {
+  margin-top: 12px;
+}
+
 .cards--home > .card--ozon-home {
   min-height: 0;
   min-width: 0;
@@ -193,6 +197,11 @@ body.has-bulk-bar {
   object-position: center;
 }
 
+.card--wb-home-logo {
+  max-width: min(100%, 96px);
+  max-height: 96px;
+}
+
 .card--sync-ozon-home {
   display: flex;
   flex-direction: column;
@@ -208,6 +217,16 @@ body.has-bulk-bar {
 .card--sync-ozon-home:hover {
   border-color: #1447b8;
   background: #1447b8;
+}
+
+.card--sync-wb-home {
+  border-color: #6f63d9;
+  background: #6f63d9;
+}
+
+.card--sync-wb-home:hover {
+  border-color: #5749c5;
+  background: #5749c5;
 }
 
 .card--sync-ozon-home:focus-within {
@@ -719,11 +738,36 @@ tr.order-item-row--cont > td {
 .tariff-cell {
   min-width: 120px;
   max-width: 180px;
+  text-align: center;
+  vertical-align: middle;
 }
 
 .tariff-label {
   font-size: 13px;
   margin-bottom: 6px;
+}
+
+.tariff-age {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 7px;
+  font-weight: 600;
+  margin: 0 auto;
+}
+
+.tariff-age--green {
+  color: #027a48;
+  background: #ecfdf3;
+}
+
+.tariff-age--yellow {
+  color: #b54708;
+  background: #fffaeb;
+}
+
+.tariff-age--red {
+  color: #b42318;
+  background: #fef3f2;
 }
 
 .tariff-bar {

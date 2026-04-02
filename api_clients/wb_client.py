@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+import base64
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -149,6 +150,46 @@ class WbClient:
             self.logger.exception("Некорректный JSON от WB API (POST)")
             raise WbApiError("Неожиданный формат ответа WB API") from exc
 
+    def _patch(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.token:
+            raise WbApiError("Отсутствует WB_API_TOKEN в .env (токен категории «Маркетплейс»).")
+
+        self._throttle()
+        url = f"{self.base_url}{path}"
+        try:
+            response = requests.patch(
+                url,
+                headers=self._headers(),
+                json=payload,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            self.logger.exception("Ошибка сети при PATCH к WB API")
+            raise WbApiError("Не удалось подключиться к API Wildberries") from exc
+
+        if response.status_code in (401, 403):
+            raise WbApiError("Ошибка авторизации в API Wildberries (проверьте токен и категорию «Маркетплейс»).")
+
+        if response.status_code >= 400:
+            detail = _wb_error_detail(response)
+            self.logger.error(
+                "Ошибка WB API PATCH: %s %s %s",
+                response.status_code,
+                response.url,
+                (response.text or "")[:800],
+            )
+            msg = f"Wildberries API вернул ошибку {response.status_code}"
+            if detail:
+                msg = f"{msg}: {detail}"
+            raise WbApiError(msg)
+
+        if not (response.text or "").strip():
+            return {}
+        try:
+            return response.json()
+        except ValueError:
+            return {}
+
     def get_new_orders(self) -> List[Dict[str, Any]]:
         data = self._get("/api/v3/orders/new")
         return list(data.get("orders") or [])
@@ -178,3 +219,74 @@ class WbClient:
             return []
         data = self._post("/api/v3/orders/status", {"orders": order_ids})
         return list(data.get("orders") or [])
+
+    def create_supply(self, name: str) -> str:
+        data = self._post("/api/v3/supplies", {"name": (name or "").strip()})
+        sid = str(data.get("id") or "").strip()
+        if not sid:
+            raise WbApiError("WB не вернул id созданной поставки")
+        return sid
+
+    def get_supplies_page(self, *, limit: int = 1000, next_cursor: int = 0) -> Dict[str, Any]:
+        return self._get(
+            "/api/v3/supplies",
+            params={"limit": max(1, min(int(limit), 1000)), "next": int(next_cursor)},
+        )
+
+    def get_supply_details(self, supply_id: str) -> Dict[str, Any]:
+        if not supply_id:
+            raise WbApiError("Не указан WB supplyId")
+        return self._get(f"/api/v3/supplies/{supply_id}")
+
+    def add_orders_to_supply(self, supply_id: str, order_ids: List[int]) -> None:
+        if not supply_id:
+            raise WbApiError("Не указан WB supplyId")
+        ids = [int(x) for x in order_ids if x is not None]
+        if not ids:
+            return
+        self._patch(f"/api/marketplace/v3/supplies/{supply_id}/orders", {"orders": ids})
+
+    def get_order_stickers_png(self, order_ids: List[int]) -> Dict[int, bytes]:
+        """POST /api/v3/orders/stickers -> {orderId: png_bytes}."""
+        ids = [int(x) for x in order_ids if x is not None]
+        if not ids:
+            return {}
+        self._throttle()
+        url = f"{self.base_url}/api/v3/orders/stickers"
+        try:
+            response = requests.post(
+                url,
+                headers=self._headers(),
+                params={"type": "png", "width": 58, "height": 40},
+                json={"orders": ids[:100]},
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            self.logger.exception("Ошибка сети при POST stickers к WB API")
+            raise WbApiError("Не удалось подключиться к API Wildberries") from exc
+        if response.status_code in (401, 403):
+            raise WbApiError("Ошибка авторизации в API Wildberries (проверьте токен и категорию «Маркетплейс»).")
+        if response.status_code >= 400:
+            detail = _wb_error_detail(response)
+            msg = f"Wildberries API вернул ошибку {response.status_code}"
+            if detail:
+                msg = f"{msg}: {detail}"
+            raise WbApiError(msg)
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise WbApiError("Неожиданный формат ответа WB API (stickers)") from exc
+        out: Dict[int, bytes] = {}
+        for s in list(data.get("stickers") or []):
+            try:
+                oid = int(s.get("orderId"))
+            except (TypeError, ValueError):
+                continue
+            raw = str(s.get("file") or "").strip()
+            if not raw:
+                continue
+            try:
+                out[oid] = base64.b64decode(raw)
+            except Exception:
+                continue
+        return out
