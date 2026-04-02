@@ -14,7 +14,7 @@
     </div>
     <div class="shipment-actions-right">
       <a
-        class="btn btn-secondary btn-shipment-top"
+        class="btn btn-secondary btn-shipment-top btn-shipment-doc"
         href="{{ url_for('wb_shipment_orders_tape_pdf', supply_id=shipment.wb_supply_id) if shipment_is_wb else url_for('shipment_orders_tape_pdf', shipment_id=shipment.id) }}"
         id="shipment-tape-download-btn"
       >
@@ -27,7 +27,7 @@
         <span>Лента заказов</span>
       </a>
       <a
-        class="btn btn-secondary btn-shipment-top"
+        class="btn btn-secondary btn-shipment-top btn-shipment-doc"
         href="{{ url_for('wb_shipment_picklist_xlsx', supply_id=shipment.wb_supply_id) if shipment_is_wb else url_for('shipment_picklist_xlsx', shipment_id=shipment.id) }}"
       >
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

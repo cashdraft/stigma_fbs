@@ -84,6 +84,17 @@ body.has-bulk-bar {
   font-size: 14px;
 }
 
+.btn-shipment-doc {
+  background: #12b76a;
+  border-color: #12b76a;
+  color: #fff;
+}
+
+.btn-shipment-doc:hover {
+  background: #079455;
+  border-color: #079455;
+}
+
 #update-ozon-progress-stage.status-progress {
   color: #667085;
 }

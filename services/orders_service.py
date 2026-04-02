@@ -2298,7 +2298,10 @@ class OrdersService:
                 )
                 order["created_at_display"] = _format_ru_short_datetime(order.get("created_at"))
                 order["shipment_date_display"] = _format_ru_short_datetime(order.get("shipment_date"))
-                tinfo = _wb_elapsed_tariff(order.get("created_at"))
+                if marketplace == "wb":
+                    tinfo = _wb_elapsed_tariff(order.get("created_at"))
+                else:
+                    tinfo = parse_shipment_tariff_from_raw(order.get("raw_json"))
                 order["tariff_label"] = tinfo["label"]
                 order["tariff_hint"] = tinfo["hint"]
                 order["tariff_segment_active"] = tinfo["segment_active"]
