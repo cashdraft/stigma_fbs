@@ -2,8 +2,7 @@
 
 Берётся страница LABEL_TEMPLATE_PDF (по умолчанию print_2026_03_25_21_41.pdf):
 сохраняются «Артикул:», «Размер:», строка из дефисов и подчёркивания.
-Растр EAC берётся из того же шаблонного PDF (та же картинка), старый экземпляр замазывается и вставляется снова,
-по вертикали по центру полос штрихкода. Заголовок: «категория / STIGMA».
+Штрихкод рисуется на всю рабочую ширину (без знака EAC). Заголовок: «категория / STIGMA».
 """
 
 from __future__ import annotations
@@ -25,9 +24,8 @@ _REDACT_SIZE_VAL = fitz.Rect(110, 116, 272, 154)
 _REDACT_SELLER = fitz.Rect(386, 124, 567, 150)
 _REDACT_COMP_COUNTRY = fitz.Rect(28, 172, 567, 200)
 _REDACT_UNDERSCORES = fitz.Rect(31, 187, 579, 214)
-_REDACT_BARCODE = fitz.Rect(28, 216, 456, 368)
-# Растровый EAC шаблона + запас под новую позицию (центр по штрихкоду)
-_REDACT_EAC = fitz.Rect(454, 212, 556, 328)
+# Зона штрихкода + бывшее место EAC в шаблоне Ozon
+_REDACT_BARCODE = fitz.Rect(28, 216, 578, 368)
 
 # Нижний край bbox текста в шаблоне (PyMuPDF) → insert_text baseline = y1 - |descender|*fs
 _TITLE_Y1 = 40.515625
@@ -46,14 +44,18 @@ _COUNTRY_RIGHT = 565.0151977539062
 _COUNTRY_Y1 = 196.796875
 _UNDER_X = 32.4853515625
 _UNDER_Y1 = 211.796875
-# Шире, чем в образце Ozon (~до 408): до ~12 pt до растрового EAC (x=460).
-_BARCODE_RECT = fitz.Rect(32, 220.796875, 452, 334.796875)
+# Штрихкод на всю рабочую ширину (как правый край текста продавца/страны).
+_BARCODE_LEFT_X = 28.0
+_BARCODE_RIGHT_X = 567.0
+_BARCODE_RECT = fitz.Rect(
+    _BARCODE_LEFT_X,
+    220.796875,
+    _BARCODE_RIGHT_X,
+    334.796875,
+)
 _DIGITS_Y1 = 365.0768737792969
 # Было 30 pt bold; просили ×1.3 меньше и обычный вес.
 _BARCODE_DIGITS_FS = 30.0 / 1.3
-_EAC_IMG_W_PT = 90.0
-_EAC_IMG_H_PT = 90.0
-_EAC_IMG_LEFT_X = 460.0
 
 _BC_RENDER_OPTS: dict[str, Any] = {
     "write_text": False,
@@ -131,26 +133,6 @@ def _hyphen_rule(face: fitz.Font, fs: float, max_w: float) -> str:
     return s
 
 
-def _extract_eac_raster_from_template(doc: fitz.Document, page_index: int) -> Optional[bytes]:
-    """PNG/JPEG поток картинки EAC справа на странице-шаблоне (как в Ozon print)."""
-    page = doc.load_page(page_index)
-    for info in page.get_images(full=True):
-        xref = info[0]
-        for r in page.get_image_rects(xref):
-            if r.x0 >= 455 and r.width >= 70:
-                blob = doc.extract_image(xref)
-                return blob.get("image")
-    return None
-
-
-def _eac_rect_centered_on_barcode(barcode_rect: fitz.Rect) -> fitz.Rect:
-    x0 = _EAC_IMG_LEFT_X
-    w, h = _EAC_IMG_W_PT, _EAC_IMG_H_PT
-    mid_y = (barcode_rect.y0 + barcode_rect.y1) / 2.0
-    y0 = mid_y - h / 2.0
-    return fitz.Rect(x0, y0, x0 + w, y0 + h)
-
-
 def _bc_png(barcode_raw: str) -> Tuple[Optional[io.BytesIO], str]:
     from barcode import Code128
     from barcode.writer import ImageWriter
@@ -218,8 +200,6 @@ def write_order_label_pdf(
         src.close()
         raise ValueError(f"LABEL_TEMPLATE_PAGE={pi} вне диапазона файла (0…{len(src)-1})")
 
-    eac_png = _extract_eac_raster_from_template(src, pi)
-
     redacts_base = (
         _REDACT_TITLE,
         _REDACT_DASH,
@@ -238,8 +218,6 @@ def write_order_label_pdf(
             page.show_pdf_page(page.rect, src, pi)
             for r in redacts_base:
                 page.add_redact_annot(r, fill=(1, 1, 1))
-            if eac_png:
-                page.add_redact_annot(_REDACT_EAC, fill=(1, 1, 1))
             page.apply_redactions()
 
             page.insert_font("lreg", fontfile=reg_path)
@@ -381,14 +359,6 @@ def write_order_label_pdf(
                     fontname="lreg",
                     fontsize=d_fs,
                     color=(0, 0, 0),
-                )
-
-            if eac_png:
-                eac_rect = _eac_rect_centered_on_barcode(_BARCODE_RECT)
-                page.insert_image(
-                    eac_rect,
-                    stream=eac_png,
-                    keep_proportion=True,
                 )
 
         base_w, base_h = 580.0, 400.0

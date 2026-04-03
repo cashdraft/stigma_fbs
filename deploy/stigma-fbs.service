@@ -1,0 +1,24 @@
+[Unit]
+Description=Stigma FBS — веб (Flask)
+Documentation=file:///srv/stigma_fbs/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/stigma_fbs
+# Переменные из .env подхватывает python-dotenv при импорте приложения
+ExecStart=/srv/stigma_fbs/.venv/bin/python -m flask --app app run --host 0.0.0.0 --port 5000
+Restart=always
+RestartSec=5
+
+# Раскомментируйте и задайте пользователя с правами на instance/, logs/
+# User=stigma
+# Group=stigma
+
+StandardOutput=append:/srv/stigma_fbs/logs/server.log
+StandardError=append:/srv/stigma_fbs/logs/server.log
+SyslogIdentifier=stigma-fbs
+
+[Install]
+WantedBy=multi-user.target
