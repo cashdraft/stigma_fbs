@@ -24,8 +24,8 @@ _REDACT_SIZE_VAL = fitz.Rect(110, 116, 272, 154)
 _REDACT_SELLER = fitz.Rect(386, 124, 567, 150)
 _REDACT_COMP_COUNTRY = fitz.Rect(28, 172, 567, 200)
 _REDACT_UNDERSCORES = fitz.Rect(31, 187, 579, 214)
-# Зона штрихкода + бывшее место EAC в шаблоне Ozon
-_REDACT_BARCODE = fitz.Rect(28, 216, 578, 368)
+# Вся нижняя полоса шаблона: векторный штрихкод + растровый EAC + цифры (ширина ~страницы).
+_REDACT_BARCODE = fitz.Rect(18, 208, 582, 378)
 
 # Нижний край bbox текста в шаблоне (PyMuPDF) → insert_text baseline = y1 - |descender|*fs
 _TITLE_Y1 = 40.515625
@@ -218,7 +218,19 @@ def write_order_label_pdf(
             page.show_pdf_page(page.rect, src, pi)
             for r in redacts_base:
                 page.add_redact_annot(r, fill=(1, 1, 1))
-            page.apply_redactions()
+            # Полное снятие растрового EAC и линий штрихкода из шаблона (пиксели EAC иногда «протекают»).
+            page.apply_redactions(
+                images=fitz.PDF_REDACT_IMAGE_REMOVE,
+                graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED,
+                text=fitz.PDF_REDACT_TEXT_REMOVE,
+            )
+            # Подстраховка: белая подложка по всей полосе под новым ШК.
+            page.draw_rect(
+                fitz.Rect(16, 206, 584, 380),
+                color=(1, 1, 1),
+                fill=(1, 1, 1),
+                width=0,
+            )
 
             page.insert_font("lreg", fontfile=reg_path)
             page.insert_font("lbold", fontfile=bold_path)

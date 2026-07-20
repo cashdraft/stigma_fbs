@@ -885,6 +885,12 @@ tr.order-item-row--cont > td {
   border: 1px solid #fecdca;
 }
 
+.alert-warning {
+  background: #fffaeb;
+  color: #b54708;
+  border: 1px solid #fedf89;
+}
+
 .col-check {
   width: 44px;
   text-align: center;

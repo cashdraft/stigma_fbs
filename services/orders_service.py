@@ -1563,6 +1563,29 @@ class OrdersService:
         )
         return False, cursor.lastrowid
 
+    def delete_order_by_posting(self, posting_number: str) -> bool:
+        """Удалить заказ и его позиции по posting_number (например, отменённый на стороне Ozon)."""
+        if not posting_number:
+            return False
+        conn = get_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT id, label_pdf_path FROM orders WHERE posting_number = ?",
+                (posting_number,),
+            ).fetchone()
+            if not row:
+                return False
+            conn.execute("DELETE FROM order_items WHERE order_id = ?", (row["id"],))
+            conn.execute("DELETE FROM orders WHERE id = ?", (row["id"],))
+            conn.commit()
+            self._unlink_label_file(row["label_pdf_path"] or "")
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     @staticmethod
     def _replace_order_items(conn, order_id: int, items: List[Dict[str, Any]]) -> None:
         conn.execute("DELETE FROM order_items WHERE order_id = ?", (order_id,))

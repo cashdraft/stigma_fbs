@@ -875,6 +875,7 @@ def create_app():
                     return posting_number, pdf
 
                 fetched: dict[str, bytes] = {}
+                failed_postings: List[str] = []
                 with ThreadPoolExecutor(max_workers=worker_count) as pool:
                     fut_map = {pool.submit(fetch_one, pn): pn for pn in unique_missing}
                     for fut in as_completed(fut_map):
@@ -883,7 +884,28 @@ def create_app():
                             got_pn, pdf = fut.result()
                             fetched[got_pn] = pdf
                         except Exception:
-                            issues.append(f"{pn}: не удалось получить этикетку Ozon.")
+                            failed_postings.append(pn)
+
+                # Этикетка недоступна: отменённый в Ozon posting удаляем локально и
+                # собираем ленту без него; настоящая ошибка по-прежнему блокирует сборку.
+                cancelled_excluded: List[str] = []
+                for pn in failed_postings:
+                    if service.client.get_fbs_posting_status(pn) == "cancelled":
+                        service.delete_order_by_posting(pn)
+                        cancelled_excluded.append(pn)
+                    else:
+                        issues.append(f"{pn}: не удалось получить этикетку Ozon.")
+
+                if cancelled_excluded:
+                    excluded_set = set(cancelled_excluded)
+                    prepared = [
+                        e for e in prepared if str(e.get("posting") or "") not in excluded_set
+                    ]
+                    flash(
+                        "Заказы отменены Ozon и исключены из ленты: "
+                        + ", ".join(cancelled_excluded),
+                        "warning",
+                    )
 
                 for entry in prepared:
                     if entry.get("ozon_pdf"):

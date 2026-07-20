@@ -224,6 +224,17 @@ class OzonClient:
         # Ozon API response format is not strictly typed here; we pass through result.
         return self._post("/v4/posting/fbs/ship/package", payload)
 
+    def get_fbs_posting_status(self, posting_number: str) -> str:
+        """Актуальный статус FBS posting из /v3/posting/fbs/get; пустая строка при ошибке."""
+        if not posting_number:
+            return ""
+        try:
+            data = self._post("/v3/posting/fbs/get", {"posting_number": posting_number})
+        except OzonApiError:
+            return ""
+        result = data.get("result") or {}
+        return str(result.get("status") or "")
+
     def get_fbs_package_label_pdf(self, posting_number: str) -> bytes:
         """Скачать PDF этикетки отправления Ozon для FBS posting."""
         if not posting_number:
