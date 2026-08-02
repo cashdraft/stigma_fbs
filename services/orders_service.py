@@ -1834,7 +1834,7 @@ class OrdersService:
 
     @staticmethod
     def wb_warehouse_short(name: Optional[str]) -> str:
-        """Короткое имя склада WB: первый элемент offices («Москва, Москва_Запад-Юг» → «Москва»)."""
+        """Короткое имя склада WB: первый элемент до запятой («Москва, Москва_Запад-Юг» → «Москва»)."""
         return str(name or "").split(",")[0].strip()
 
     def get_orders(
