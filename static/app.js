@@ -1368,7 +1368,8 @@ document.addEventListener("DOMContentLoaded", () => {
       shipments.forEach((s) => {
         const opt = document.createElement("option");
         opt.value = String(s.id);
-        opt.textContent = s.name || String(s.id);
+        const baseName = s.name || String(s.id);
+        opt.textContent = s.warehouse ? `${baseName} · ${s.warehouse}` : baseName;
         shipmentExistingSelect.appendChild(opt);
       });
 
@@ -1410,6 +1411,9 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     shipmentNameHidden.value = name;
+    const splitWhCb = document.getElementById("shipment-split-wh");
+    const splitWhField = document.getElementById("shipment-split-wh-field");
+    if (splitWhField) splitWhField.value = splitWhCb && splitWhCb.checked ? "1" : "0";
     sync();
     const hasSplit = splitOrdersCount() > 0;
     if (shipmentModalCreate) shipmentModalCreate.disabled = true;
@@ -1516,6 +1520,7 @@ document.addEventListener("DOMContentLoaded", () => {
     p.set("date_from", root.dataset.filterDateFrom || "");
     p.set("date_to", root.dataset.filterDateTo || "");
     p.set("q", root.dataset.filterQ || "");
+    p.set("wh", root.dataset.filterWh || "");
     p.set("page", String(page));
     return p.toString();
   }

@@ -63,6 +63,10 @@ def init_db():
         ship_columns = {col["name"] for col in conn.execute("PRAGMA table_info(shipments)").fetchall()}
         if "wb_supply_id" not in ship_columns:
             conn.execute("ALTER TABLE shipments ADD COLUMN wb_supply_id TEXT")
+        ship_columns = {col["name"] for col in conn.execute("PRAGMA table_info(shipments)").fetchall()}
+        if "warehouse_name" not in ship_columns:
+            # Склад продавца WB (короткое имя, напр. «Москва»/«Казань»); поставка = один склад
+            conn.execute("ALTER TABLE shipments ADD COLUMN warehouse_name TEXT")
         conn.commit()
     finally:
         conn.close()

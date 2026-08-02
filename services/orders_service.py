@@ -1832,6 +1832,11 @@ class OrdersService:
         finally:
             conn.close()
 
+    @staticmethod
+    def wb_warehouse_short(name: Optional[str]) -> str:
+        """Короткое имя склада WB: первый элемент offices («Москва, Москва_Запад-Юг» → «Москва»)."""
+        return str(name or "").split(",")[0].strip()
+
     def get_orders(
         self,
         status: str = "all",
@@ -1841,6 +1846,7 @@ class OrdersService:
         page: int = 1,
         per_page: int = 20,
         marketplace: str = "ozon",
+        warehouse: Optional[str] = None,
     ) -> Dict[str, Any]:
         conn = get_db_connection()
         try:
@@ -1888,6 +1894,14 @@ class OrdersService:
                 )
                 q = f"%{query}%"
                 params.extend([q, q, q, q, q, q, q, q])
+
+            # Срез без фильтра склада — для счётчиков складов при активном фильтре
+            where_no_wh_sql = " AND ".join(where)
+            params_no_wh = list(params)
+            wh_short = self.wb_warehouse_short(warehouse) if warehouse else ""
+            if wh_short:
+                where.append("(o.warehouse_name = ? OR o.warehouse_name LIKE ?)")
+                params.extend([wh_short, wh_short + ",%"])
 
             where_sql = " AND ".join(where)
             total = conn.execute(
@@ -1967,7 +1981,25 @@ class OrdersService:
                     for code, label in wb_tabs_order
                 ]
                 status_tabs.append({"value": "all", "label": "Все", "count": int(total_all)})
+
+                # Табы складов: счётчики в текущем срезе (статус/период/поиск), без фильтра склада
+                wh_counts: Dict[str, int] = {}
+                for wr in conn.execute(
+                    f"SELECT o.warehouse_name AS wn, COUNT(*) AS cnt FROM orders o "
+                    f"WHERE {where_no_wh_sql} GROUP BY o.warehouse_name",
+                    params_no_wh,
+                ).fetchall():
+                    short = self.wb_warehouse_short(wr["wn"])
+                    if short:
+                        wh_counts[short] = wh_counts.get(short, 0) + int(wr["cnt"])
+                warehouse_tabs = [
+                    {"value": "", "label": "Все склады", "count": sum(wh_counts.values())}
+                ] + [
+                    {"value": wname, "label": wname, "count": cnt}
+                    for wname, cnt in sorted(wh_counts.items(), key=lambda x: -x[1])
+                ]
             else:
+                warehouse_tabs = []
                 status_options = [
                     {"value": s["status"], "label": STATUS_LABELS.get(s["status"], s["status"] or "-")}
                     for s in statuses
@@ -2069,11 +2101,13 @@ class OrdersService:
                 order["tariff_segment_active"] = tinfo["segment_active"]
                 order["tariff_segment_count"] = tinfo["segment_count"]
                 order["tariff_age_level"] = tinfo.get("age_level", "")
+                order["warehouse_short"] = self.wb_warehouse_short(order.get("warehouse_name"))
 
             return {
                 "orders": orders,
                 "status_options": status_options,
                 "status_tabs": status_tabs,
+                "warehouse_tabs": warehouse_tabs,
                 "total": total,
                 "page": page,
                 "per_page": per_page,
@@ -2130,7 +2164,19 @@ class OrdersService:
             conn.close()
 
     def get_wb_supplies_available(self, limit: int = 200) -> List[Dict[str, Any]]:
-        """Активные поставки WB из API (для «Добавить в существующую»)."""
+        """Активные поставки WB из API (для «Добавить в существующую»), склад — из локальной БД."""
+        wh_map: Dict[str, str] = {}
+        conn = get_db_connection()
+        try:
+            for r in conn.execute(
+                "SELECT wb_supply_id, warehouse_name FROM shipments "
+                "WHERE marketplace = 'wb' AND IFNULL(wb_supply_id, '') <> ''"
+            ).fetchall():
+                wh = self.wb_warehouse_short(r["warehouse_name"])
+                if wh:
+                    wh_map[str(r["wb_supply_id"])] = wh
+        finally:
+            conn.close()
         out: List[Dict[str, Any]] = []
         next_cursor = 0
         page_limit = min(max(int(limit), 1), 1000)
@@ -2145,7 +2191,7 @@ class OrdersService:
                     continue
                 if bool(s.get("done")):
                     continue
-                out.append({"id": sid, "name": str(s.get("name") or sid)})
+                out.append({"id": sid, "name": str(s.get("name") or sid), "warehouse": wh_map.get(sid, "")})
                 if len(out) >= limit:
                     break
             nxt = page.get("next")
@@ -2193,7 +2239,7 @@ class OrdersService:
         try:
             rows = conn.execute(
                 """
-                SELECT o.raw_json, s.wb_supply_id AS local_supply_id
+                SELECT o.raw_json, o.warehouse_name AS order_wh, s.wb_supply_id AS local_supply_id
                 FROM orders o
                 LEFT JOIN shipments s ON s.id = o.shipment_id
                 WHERE o.marketplace = 'wb'
@@ -2202,6 +2248,7 @@ class OrdersService:
                 """
             ).fetchall()
             counts: Dict[str, int] = {}
+            warehouses: Dict[str, str] = {}
             for r in rows:
                 raw = r["raw_json"]
                 sid = ""
@@ -2216,6 +2263,10 @@ class OrdersService:
                 if not sid:
                     continue
                 counts[sid] = counts.get(sid, 0) + 1
+                if sid not in warehouses:
+                    wh = self.wb_warehouse_short(r["order_wh"])
+                    if wh:
+                        warehouses[sid] = wh
             if not counts:
                 return []
             name_map: Dict[str, str] = {}
@@ -2224,7 +2275,12 @@ class OrdersService:
             except Exception:
                 self.logger.exception("Не удалось получить имена WB поставок для чипов")
             items = [
-                {"id": sid, "name": (name_map.get(sid) or sid), "orders_count": int(cnt)}
+                {
+                    "id": sid,
+                    "name": (name_map.get(sid) or sid),
+                    "orders_count": int(cnt),
+                    "warehouse": warehouses.get(sid, ""),
+                }
                 for sid, cnt in counts.items()
             ]
             items.sort(key=lambda x: x["orders_count"], reverse=True)
@@ -2321,6 +2377,7 @@ class OrdersService:
                 )
                 order["created_at_display"] = _format_ru_short_datetime(order.get("created_at"))
                 order["shipment_date_display"] = _format_ru_short_datetime(order.get("shipment_date"))
+                order["warehouse_short"] = self.wb_warehouse_short(order.get("warehouse_name"))
                 if marketplace == "wb":
                     tinfo = _wb_elapsed_tariff(order.get("created_at"))
                 else:
@@ -2377,6 +2434,7 @@ class OrdersService:
                 order["status_label"] = WB_STATUS_LABELS.get(order.get("status"), order.get("status") or "-")
                 order["created_at_display"] = _format_ru_short_datetime(order.get("created_at"))
                 order["shipment_date_display"] = _format_ru_short_datetime(order.get("shipment_date"))
+                order["warehouse_short"] = self.wb_warehouse_short(order.get("warehouse_name"))
                 tinfo = parse_shipment_tariff_from_raw(order.get("raw_json"))
                 order["tariff_label"] = tinfo["label"]
                 order["tariff_hint"] = tinfo["hint"]
@@ -2730,7 +2788,13 @@ class OrdersService:
         finally:
             conn.close()
 
-    def create_wb_shipment_with_orders(self, name: str, order_ids: List[int]) -> Dict[str, Any]:
+    def create_wb_shipment_with_orders(
+        self,
+        name: str,
+        order_ids: List[int],
+        split_by_warehouse: bool = False,
+    ) -> Dict[str, Any]:
+        """Поставка WB = один склад продавца. Смешение складов — ошибка либо авторазбиение."""
         clean = (name or "").strip()
         if not clean:
             return {"ok": False, "error": "Укажите название поставки"}
@@ -2738,6 +2802,62 @@ class OrdersService:
         if not ids:
             return {"ok": False, "error": "Не выбрано ни одного заказа"}
 
+        conn = get_db_connection()
+        try:
+            ph = ",".join("?" * len(ids))
+            rows = conn.execute(
+                f"""
+                SELECT id, warehouse_name
+                FROM orders
+                WHERE id IN ({ph}) AND marketplace = 'wb' AND status = 'new'
+                """,
+                ids,
+            ).fetchall()
+            if len(rows) != len(ids):
+                return {"ok": False, "error": "Для WB можно выбрать только заказы со статусом «Новые»"}
+            by_wh: Dict[str, List[int]] = {}
+            for r in rows:
+                wh = self.wb_warehouse_short(r["warehouse_name"]) or "—"
+                by_wh.setdefault(wh, []).append(int(r["id"]))
+        finally:
+            conn.close()
+
+        if len(by_wh) > 1 and not split_by_warehouse:
+            parts = ", ".join(f"{wh}: {len(v)}" for wh, v in sorted(by_wh.items()))
+            return {
+                "ok": False,
+                "error": (
+                    f"Выбраны заказы с разных складов ({parts}). Поставка WB формируется "
+                    "по одному складу — отфильтруйте заказы по складу или включите "
+                    "«Разбить по складам автоматически»."
+                ),
+            }
+
+        if len(by_wh) == 1:
+            wh, group_ids = next(iter(by_wh.items()))
+            return self._create_wb_shipment_single(clean, group_ids, wh)
+
+        results: List[Dict[str, Any]] = []
+        for wh in sorted(by_wh):
+            res = self._create_wb_shipment_single(f"{clean} ({wh})", by_wh[wh], wh)
+            results.append(res)
+            if not res.get("ok"):
+                created = "; ".join(
+                    f"«{x.get('name')}» ({x.get('count')})" for x in results if x.get("ok")
+                )
+                prefix = f"Создано: {created}. " if created else ""
+                return {"ok": False, "error": f"{prefix}Ошибка на складе «{wh}»: {res.get('error')}"}
+        return {
+            "ok": True,
+            "name": " + ".join(str(x.get("name")) for x in results),
+            "wb_supply_id": ", ".join(str(x.get("wb_supply_id")) for x in results),
+            "count": sum(int(x.get("count") or 0) for x in results),
+            "requested_count": sum(int(x.get("requested_count") or 0) for x in results),
+        }
+
+    def _create_wb_shipment_single(
+        self, clean: str, ids: List[int], warehouse: str
+    ) -> Dict[str, Any]:
         conn = get_db_connection()
         try:
             ph = ",".join("?" * len(ids))
@@ -2764,8 +2884,9 @@ class OrdersService:
 
             now = datetime.utcnow().isoformat()
             cur = conn.execute(
-                "INSERT INTO shipments (name, marketplace, created_at, wb_supply_id) VALUES (?, 'wb', ?, ?)",
-                (clean, now, wb_supply_id),
+                "INSERT INTO shipments (name, marketplace, created_at, wb_supply_id, warehouse_name) "
+                "VALUES (?, 'wb', ?, ?, ?)",
+                (clean, now, wb_supply_id, warehouse or None),
             )
             shipment_id = int(cur.lastrowid)
             conn.execute(
@@ -2814,7 +2935,7 @@ class OrdersService:
             ph = ",".join("?" * len(ids))
             rows = conn.execute(
                 f"""
-                SELECT id, posting_number
+                SELECT id, posting_number, warehouse_name
                 FROM orders
                 WHERE id IN ({ph}) AND marketplace = 'wb' AND status = 'new'
                 """,
@@ -2822,6 +2943,38 @@ class OrdersService:
             ).fetchall()
             if len(rows) != len(ids):
                 return {"ok": False, "error": "Для WB можно выбрать только заказы со статусом «Новые»"}
+            sel_whs = sorted({self.wb_warehouse_short(r["warehouse_name"]) or "—" for r in rows})
+            if len(sel_whs) > 1:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Выбраны заказы с разных складов ({', '.join(sel_whs)}). "
+                        "В одну поставку WB можно добавлять только заказы одного склада."
+                    ),
+                }
+            sel_wh = sel_whs[0]
+            supply_wh_row = conn.execute(
+                """
+                SELECT s.warehouse_name AS swh,
+                       (SELECT o.warehouse_name FROM orders o
+                        WHERE o.shipment_id = s.id AND IFNULL(o.warehouse_name, '') <> ''
+                        LIMIT 1) AS owh
+                FROM shipments s
+                WHERE s.marketplace = 'wb' AND s.wb_supply_id = ?
+                """,
+                (sid,),
+            ).fetchone()
+            supply_wh = ""
+            if supply_wh_row:
+                supply_wh = self.wb_warehouse_short(supply_wh_row["swh"] or supply_wh_row["owh"])
+            if supply_wh and sel_wh != supply_wh:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Заказы со склада «{sel_wh}», а поставка — склад «{supply_wh}». "
+                        "Смешивать склады в одной поставке WB нельзя."
+                    ),
+                }
             wb_order_ids: List[int] = []
             for r in rows:
                 try:
@@ -2839,11 +2992,17 @@ class OrdersService:
             if srow:
                 shipment_id = int(srow["id"])
                 shipment_name = str(srow["name"] or sid)
+                if not supply_wh and sel_wh and sel_wh != "—":
+                    conn.execute(
+                        "UPDATE shipments SET warehouse_name = ? WHERE id = ?",
+                        (sel_wh, shipment_id),
+                    )
             else:
                 shipment_name = sid
                 cur = conn.execute(
-                    "INSERT INTO shipments (name, marketplace, created_at, wb_supply_id) VALUES (?, 'wb', ?, ?)",
-                    (shipment_name, now, sid),
+                    "INSERT INTO shipments (name, marketplace, created_at, wb_supply_id, warehouse_name) "
+                    "VALUES (?, 'wb', ?, ?, ?)",
+                    (shipment_name, now, sid, sel_wh if sel_wh != "—" else None),
                 )
                 shipment_id = int(cur.lastrowid)
 

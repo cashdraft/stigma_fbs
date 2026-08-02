@@ -12,6 +12,7 @@
     data-filter-date-from="{{ filters.date_from }}"
     data-filter-date-to="{{ filters.date_to }}"
     data-filter-q="{{ filters.q }}"
+    data-filter-wh="{{ filters.wh }}"
     data-next-page="{{ next_page or 0 }}"
     data-has-more="{{ 'true' if has_more else 'false' }}"
   >
@@ -32,7 +33,7 @@
     <div class="shipments-toolbar" aria-label="Существующие поставки WB">
       {% for s in top_shipments %}
         <a class="shipment-chip" href="{{ url_for('wb_shipment_detail', supply_id=s.id) }}">
-          <span>{{ s.name }}</span>
+          <span>{{ s.name }}{% if s.warehouse %} · {{ s.warehouse }}{% endif %}</span>
           <span class="shipment-chip-count">{{ s.orders_count }}</span>
         </a>
       {% endfor %}
@@ -44,13 +45,27 @@
       {% for tab in data.status_tabs %}
         <a
           class="status-tab{% if filters.status == tab.value %} status-tab--active{% endif %}"
-          href="{{ url_for('orders_wb', status=tab.value, date_from=filters.date_from, date_to=filters.date_to, q=filters.q) }}"
+          href="{{ url_for('orders_wb', status=tab.value, date_from=filters.date_from, date_to=filters.date_to, q=filters.q, wh=filters.wh) }}"
         >
           <span>{{ tab.label }}</span>
           <span class="status-tab-count">{{ tab.count }}</span>
         </a>
       {% endfor %}
     </div>
+
+    {% if data.warehouse_tabs and data.warehouse_tabs|length > 2 %}
+      <div class="status-tabs status-tabs--warehouse" aria-label="Фильтр по складу WB">
+        {% for wt in data.warehouse_tabs %}
+          <a
+            class="status-tab{% if filters.wh == wt.value %} status-tab--active{% endif %}"
+            href="{{ url_for('orders_wb', status=filters.status, date_from=filters.date_from, date_to=filters.date_to, q=filters.q, wh=wt.value) }}"
+          >
+            <span>{{ wt.label }}</span>
+            <span class="status-tab-count">{{ wt.count }}</span>
+          </a>
+        {% endfor %}
+      </div>
+    {% endif %}
 
     <div class="period-control" id="period-control">
       <button
@@ -83,6 +98,7 @@
 
     <form method="get" action="{{ url_for('orders_wb') }}" id="orders-search-form" class="status-search-form">
       <input type="hidden" name="status" value="{{ filters.status }}" />
+      <input type="hidden" name="wh" value="{{ filters.wh }}" />
       <input type="hidden" name="date_from" id="search-date-from" value="{{ filters.date_from }}" />
       <input type="hidden" name="date_to" id="search-date-to" value="{{ filters.date_to }}" />
       <span class="status-search-icon" aria-hidden="true">🔍</span>
@@ -102,6 +118,7 @@
   <form method="get" action="{{ url_for('orders_wb') }}" class="filters filters--hidden" id="orders-filters">
     <input type="hidden" name="status" value="{{ filters.status }}" />
     <input type="hidden" name="q" value="{{ filters.q }}" />
+    <input type="hidden" name="wh" value="{{ filters.wh }}" />
     <input type="hidden" name="date_from" value="{{ filters.date_from }}" autocomplete="off" />
     <input type="hidden" name="date_to" value="{{ filters.date_to }}" autocomplete="off" />
     <noscript>
@@ -126,6 +143,7 @@
         </th>
         <th>ID</th>
         <th>Поставка</th>
+        <th>Склад</th>
         <th class="col-status">Статус</th>
         <th>Создан</th>
         <th>Тариф</th>
@@ -145,7 +163,7 @@
         {% endwith %}
       {% else %}
         <tr>
-          <td colspan="13">Заказы не найдены — выполните синхронизацию и проверьте WB_API_TOKEN в .env</td>
+          <td colspan="14">Заказы не найдены — выполните синхронизацию и проверьте WB_API_TOKEN в .env</td>
         </tr>
       {% endif %}
     </tbody>
@@ -168,6 +186,7 @@
         <form method="post" action="{{ url_for('orders_wb_shipment_create') }}" id="shipment-create-form" class="shipment-create-form">
           <input type="hidden" name="next" value="{{ request.full_path }}" />
           <input type="hidden" name="shipment_name" id="shipment-name-field" value="" />
+          <input type="hidden" name="split_by_warehouse" id="shipment-split-wh-field" value="0" />
           <div id="shipment-order-inputs"></div>
           <button type="button" class="btn btn-bulk-primary" id="shipment-open-btn">+ Новая поставка</button>
         </form>
@@ -189,6 +208,10 @@
       <p class="modal-subtitle-shipment">В неё попадут выбранные заказы WB (Новые)</p>
       <label class="shipment-name-label" for="shipment-name-input">Название поставки</label>
       <input type="text" id="shipment-name-input" class="shipment-name-input" autocomplete="off" />
+      <label class="shipment-split-wh-label" for="shipment-split-wh">
+        <input type="checkbox" id="shipment-split-wh" checked />
+        Разбить по складам автоматически (если выбраны Москва и Казань — будет две поставки)
+      </label>
       <div class="modal-actions modal-actions-shipment">
         <button type="button" class="btn btn-shipment-create" id="shipment-modal-create">Создать и добавить</button>
         <button type="button" class="btn btn-shipment-close" id="shipment-modal-close">Закрыть</button>

@@ -221,6 +221,7 @@ def create_app():
         date_from = request.args.get("date_from", "")
         date_to = request.args.get("date_to", "")
         query = request.args.get("q", "")
+        wh = request.args.get("wh", "")
         per_page = Config.ORDERS_CHUNK_SIZE
         data = service.get_orders(
             status=status,
@@ -230,6 +231,7 @@ def create_app():
             page=1,
             per_page=per_page,
             marketplace="wb",
+            warehouse=wh or None,
         )
         top_shipments = service.get_wb_supplies_with_orders()
         has_more = data["page"] < data["pages"]
@@ -242,6 +244,7 @@ def create_app():
                 "date_from": date_from,
                 "date_to": date_to,
                 "q": query,
+                "wh": wh,
             },
             has_more=has_more,
             next_page=2 if has_more else None,
@@ -253,6 +256,7 @@ def create_app():
         date_from = request.args.get("date_from", "")
         date_to = request.args.get("date_to", "")
         query = request.args.get("q", "")
+        wh = request.args.get("wh", "")
         page = parse_int(request.args.get("page"), 2, min_value=2)
         per_page = Config.ORDERS_CHUNK_SIZE
         data = service.get_orders(
@@ -263,6 +267,7 @@ def create_app():
             page=page,
             per_page=per_page,
             marketplace="wb",
+            warehouse=wh or None,
         )
         html = render_template("partials/order_rows.html", orders=data["orders"])
         has_more = page < data["pages"]
@@ -1640,6 +1645,7 @@ def create_app():
         if not (isinstance(next_url, str) and next_url.startswith("/") and not next_url.startswith("//")):
             next_url = url_for("orders_wb", status="new")
         shipment_name = (request.form.get("shipment_name") or "").strip()
+        split_by_warehouse = (request.form.get("split_by_warehouse") or "") == "1"
         order_ids: List[int] = []
         for x in ids_raw:
             try:
@@ -1647,7 +1653,9 @@ def create_app():
             except (TypeError, ValueError):
                 continue
         try:
-            result = service.create_wb_shipment_with_orders(shipment_name, order_ids)
+            result = service.create_wb_shipment_with_orders(
+                shipment_name, order_ids, split_by_warehouse=split_by_warehouse
+            )
             if result.get("ok"):
                 success_msg = (
                     f"WB поставка «{result.get('name')}» создана ({result.get('wb_supply_id')}), "

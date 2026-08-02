@@ -32,6 +32,9 @@
         {{ order.shipment_name or '—' }}
       {% endif %}
     </td>
+    {% if order.marketplace|default('ozon') == 'wb' %}
+    <td class="warehouse-cell" rowspan="{{ rs }}">{{ order.warehouse_short or '—' }}</td>
+    {% endif %}
     <td class="col-status" rowspan="{{ rs }}"><span class="status status--{{ order.status or 'unknown' }}">{{ order.status_label }}</span></td>
     <td class="date-cell" rowspan="{{ rs }}">{{ order.created_at_display or '-' }}</td>
     <td class="tariff-cell" rowspan="{{ rs }}">
@@ -132,6 +135,9 @@
         {{ order.shipment_name or '—' }}
       {% endif %}
     </td>
+    {% if order.marketplace|default('ozon') == 'wb' %}
+    <td class="warehouse-cell">{{ order.warehouse_short or '—' }}</td>
+    {% endif %}
     <td class="col-status"><span class="status status--{{ order.status or 'unknown' }}">{{ order.status_label }}</span></td>
     <td class="date-cell">{{ order.created_at_display or '-' }}</td>
     <td class="tariff-cell">
